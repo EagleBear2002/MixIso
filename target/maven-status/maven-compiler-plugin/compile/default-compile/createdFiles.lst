@@ -1,0 +1,12 @@
+model/Operation.class
+model/StaticDependencyGraph.class
+model/StaticOperation.class
+model/IsolationLevel.class
+model/ProgramInstance.class
+model/Session.class
+algorithm/Allocator.class
+model/Edge.class
+model/TemplateSet.class
+model/Transaction.class
+algorithm/Allocator$WorkloadParams.class
+model/OperationType.class
