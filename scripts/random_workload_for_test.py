@@ -124,15 +124,13 @@ def parse_csv_by_params(csv_file: Path) -> Dict[str, Dict[str, List[float]]]:
     Format: {
         'txns': {param_value: [times...]},
         'max-ops': {param_value: [times...]},
-        'max-key': {param_value: [times...]},
-        'read-only': {param_value: [times...]}
+        'max-key': {param_value: [times...]}
     }
     """
     result = {
         'txns': {},
         'max-ops': {},
-        'max-key': {},
-        'read-only': {}
+        'max-key': {}
     }
     
     if not csv_file.exists():
@@ -170,10 +168,6 @@ def parse_csv_by_params(csv_file: Path) -> Dict[str, Dict[str, List[float]]]:
                     if max_key not in result['max-key']:
                         result['max-key'][max_key] = []
                     result['max-key'][max_key].append(execution_time)
-                    
-                    if read_only not in result['read-only']:
-                        result['read-only'][read_only] = []
-                    result['read-only'][read_only].append(execution_time)
     
     except Exception as e:
         print(f"{RED}Error parsing CSV: {e}{NC}")
@@ -187,8 +181,8 @@ def create_plots(csv_file: Path) -> None:
     
     data = parse_csv_by_params(csv_file)
     
-    # Create a figure with 4 subplots
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    # Create a figure with 3 subplots in a row
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle('Allocation Performance vs Workload Parameters', fontsize=16, fontweight='bold')
     
     # Helper function to plot a parameter
@@ -215,10 +209,9 @@ def create_plots(csv_file: Path) -> None:
         ax.grid(axis='y', alpha=0.3)
     
     # Plot each parameter
-    plot_parameter(axes[0, 0], 'txns', data['txns'], 'Number of Transactions')
-    plot_parameter(axes[0, 1], 'max-ops', data['max-ops'], 'Max Operations per Txn')
-    plot_parameter(axes[1, 0], 'max-key', data['max-key'], 'Max Key ID')
-    plot_parameter(axes[1, 1], 'read-only', data['read-only'], 'Read-only %')
+    plot_parameter(axes[0], 'txns', data['txns'], 'Number of Transactions')
+    plot_parameter(axes[1], 'max-ops', data['max-ops'], 'Max Operations per Txn')
+    plot_parameter(axes[2], 'max-key', data['max-key'], 'Max Key ID')
     
     plt.tight_layout()
     
@@ -291,13 +284,13 @@ def main():
     
     # Base parameters (baseline values)
     base_params = {
-        'txns': 500,
+        'txns': 5000,
         'max_ops': 10,
         'max_key': 300,
         'read_only': 50
     }
     
-    cases = 3  # Number of cases per configuration
+    cases = 10  # Number of cases per configuration
     
     print("Base Parameters (Baseline):")
     print(f"  txns: {base_params['txns']}")
@@ -312,7 +305,7 @@ def main():
         {
             'name': 'Exp1: Varying Transaction Count',
             'varying_param': 'txns',
-            'values': [100, 200, 500]
+            'values': [100, 200, 500, 1000, 2000, 5000, 10000]
         },
         {
             'name': 'Exp2: Varying Operations per Transaction',
@@ -322,12 +315,12 @@ def main():
         {
             'name': 'Exp3: Varying Key Space Size',
             'varying_param': 'max_key',
-            'values': [100, 500, 600, 700, 800, 900, 1000]
+            'values': [100, 500, 1000, 2000, 3000, 5000, 10000]
         },
         {
             'name': 'Exp4: Varying Read-Only Percentage',
             'varying_param': 'read_only',
-            'values': [0, 20, 40, 60, 80, 100]
+            'values': [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
         }
     ]
     

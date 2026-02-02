@@ -35,10 +35,19 @@ def get_classpath(classes_dir, project_dir):
     """
     classpath_parts = [str(classes_dir)]
     
-    # Try to find dependencies in Maven local repository
+    # Add target/dependency directory if it exists
+    dependency_dir = project_dir / 'target' / 'dependency'
+    if dependency_dir.exists():
+        if sys.platform == 'win32':
+            classpath_parts.append(str(dependency_dir / '*'))
+        else:
+            # On non-Windows, we might need to expand the wildcard or use it as is
+            # Java handles the * wildcard in classpath
+            classpath_parts.append(str(dependency_dir / '*'))
+    
+    # Also try to find dependencies in Maven local repository as fallback
     m2_repo = Path.home() / '.m2' / 'repository'
     if m2_repo.exists():
-        # Add required dependencies in order
         required_deps = [
             'com/google/code/gson/gson/2.8.9/gson-2.8.9.jar',
             'com/fasterxml/jackson/core/jackson-databind/2.13.3/jackson-databind-2.13.3.jar',
@@ -60,12 +69,13 @@ def allocate_file(input_file, output_file, classpath, debug=False):
     filename = Path(input_file).name
     
     try:
-        # Use Java 17 explicitly if available
+        # Use system 'java' by default, or JAVA_HOME if set
         java_cmd = 'java'
-        if sys.platform == 'win32':
-            java17_path = r'C:\Users\EagleBear2002\.jdks\jbr-17.0.14\bin\java.exe'
-            if Path(java17_path).exists():
-                java_cmd = java17_path
+        java_home = os.environ.get('JAVA_HOME')
+        if java_home:
+            candidate = Path(java_home) / 'bin' / ('java.exe' if sys.platform == 'win32' else 'java')
+            if candidate.exists():
+                java_cmd = str(candidate)
         
         cmd = [
             java_cmd,

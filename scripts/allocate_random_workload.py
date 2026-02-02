@@ -46,10 +46,19 @@ def get_classpath(classes_dir, project_dir):
     """
     classpath_parts = [str(classes_dir)]
     
-    # Try to find dependencies in Maven local repository
+    # Add target/dependency directory if it exists
+    dependency_dir = project_dir / 'target' / 'dependency'
+    if dependency_dir.exists():
+        if sys.platform == 'win32':
+            classpath_parts.append(str(dependency_dir / '*'))
+        else:
+            # On non-Windows, we might need to expand the wildcard or use it as is
+            # Java handles the * wildcard in classpath
+            classpath_parts.append(str(dependency_dir / '*'))
+            
+    # Also try to find dependencies in Maven local repository as fallback
     m2_repo = Path.home() / '.m2' / 'repository'
     if m2_repo.exists():
-        # Add required dependencies in order
         required_deps = [
             'com/google/code/gson/gson/2.8.9/gson-2.8.9.jar',
             'com/fasterxml/jackson/core/jackson-databind/2.13.3/jackson-databind-2.13.3.jar',
@@ -73,12 +82,13 @@ def allocate_file(input_file, output_file, classpath, debug=False) -> Tuple[str,
     try:
         start_time = time.time()
         
-        # Use Java 17 explicitly if available
+        # Use system 'java' by default, or JAVA_HOME if set
         java_cmd = 'java'
-        if sys.platform == 'win32':
-            java17_path = r'C:\Users\EagleBear2002\.jdks\jbr-17.0.14\bin\java.exe'
-            if Path(java17_path).exists():
-                java_cmd = java17_path
+        java_home = os.environ.get('JAVA_HOME')
+        if java_home:
+            candidate = Path(java_home) / 'bin' / ('java.exe' if sys.platform == 'win32' else 'java')
+            if candidate.exists():
+                java_cmd = str(candidate)
         
         cmd = [
             java_cmd,
@@ -133,24 +143,22 @@ def create_plots_from_analysis_csv(analysis_csv):
         # Read analysis CSV
         df = pd.read_csv(analysis_csv)
         
-        # Create a unified figure with 4 subplots
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        # Create a unified figure with 3 subplots in a row
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
         fig.suptitle('Allocation Performance vs Workload Parameters', fontsize=16, fontweight='bold')
         
         # Mapping of plot names to subplot positions
         plot_positions = {
-            'txn_count_vs_time': axes[0, 0],
-            'op_per_txn_vs_time': axes[0, 1],
-            'max_key_vs_time': axes[1, 0],
-            'read_only_vs_time': axes[1, 1]
+            'txn_count_vs_time': axes[0],
+            'op_per_txn_vs_time': axes[1],
+            'max_key_vs_time': axes[2]
         }
         
         # Formatting info
         param_labels = {
             'txns': 'Number of Transactions',
             'max_ops': 'Max Operations per Transaction',
-            'max_key': 'Max Key ID (in thousands)',
-            'read_only': 'Read-only Percentage (%)'
+            'max_key': 'Max Key ID (in thousands)'
         }
         
         # Plot data for each parameter
@@ -366,8 +374,8 @@ def parse_csv_and_create_plots(result_csv):
             print(f"{YELLOW}Warning: No valid data found in CSV{NC}")
             return
         
-        # Create figure with 4 subplots
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        # Create figure with 3 subplots in a row
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
         fig.suptitle('Allocation Performance vs Workload Parameters', fontsize=16, fontweight='bold')
         
         # Helper function to analyze single variable
@@ -379,8 +387,7 @@ def parse_csv_and_create_plots(result_csv):
                 key = (
                     item['txns'],
                     item['max_ops'],
-                    item['max_key'],
-                    item['read_only']
+                    item['max_key']
                 )
                 
                 if key not in grouped:
@@ -409,7 +416,7 @@ def parse_csv_and_create_plots(result_csv):
             # Find the most common values for other parameters (representing base config)
             from collections import Counter
             
-            other_params = {'txns', 'max_ops', 'max_key', 'read_only'} - {varying_param}
+            other_params = {'txns', 'max_ops', 'max_key'} - {varying_param}
             
             param_counts = {}
             for param in other_params:
@@ -464,10 +471,9 @@ def parse_csv_and_create_plots(result_csv):
             ax.set_title(f'Performance vs {param_name}\n(Base config: {config_str})', fontsize=11)
         
         # Plot each parameter
-        plot_parameter(axes[0, 0], 'txns', all_data, 'Number of Transactions')
-        plot_parameter(axes[0, 1], 'max_ops', all_data, 'Max Operations per Txn')
-        plot_parameter(axes[1, 0], 'max_key', all_data, 'Max Key ID (in thousands)')
-        plot_parameter(axes[1, 1], 'read_only', all_data, 'Read-only Percentage (%)')
+        plot_parameter(axes[0], 'txns', all_data, 'Number of Transactions')
+        plot_parameter(axes[1], 'max_ops', all_data, 'Max Operations per Txn')
+        plot_parameter(axes[2], 'max_key', all_data, 'Max Key ID (in thousands)')
         
         plt.tight_layout()
         
