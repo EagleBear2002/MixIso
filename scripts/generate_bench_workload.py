@@ -168,6 +168,10 @@ class WorkloadGenerator:
                 
                 # Generate workload for each case
                 for case_num in range(1, self.cases + 1):
+                    # Set seed for reproducible but distinct workloads across cases
+                    # Ensures consistent distribution regardless of when/how many times script is run
+                    self.random.seed(case_num)
+                    
                     transactions = []
                     
                     # Instantiate each template according to its percentage

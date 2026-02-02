@@ -62,7 +62,7 @@ This experiment allocates isolation levels for standard benchmarks (Courseware, 
 
 ```sh
 # Generate benchmark workloads
-python scripts/generate_bench_workload.py --txns 100 --max-key 500 --cases 10
+python scripts/generate_bench_workload.py --txns 1000 --max-key 500 --cases 100
 
 # Perform allocation
 python scripts/allocate_bench_workload.py
