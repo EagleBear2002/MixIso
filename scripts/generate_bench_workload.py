@@ -3,6 +3,7 @@
 Generate benchmark workloads from templates.
 Reads JSON files from data/benchmarks and generates workload files to data/bench_workload.
 Each transaction is named "templatename_id", e.g., "Balance_1".
+Each workload contains multiple sessions, and each session contains multiple transactions.
 """
 
 import os
@@ -29,11 +30,16 @@ NC = '\033[0m'
 class WorkloadGenerator:
     """Generate benchmark workloads from templates"""
     
-    def __init__(self, total_txns: int = 10000, max_key: int = 1000, cases: int = 20):
-        self.total_txns = total_txns
+    def __init__(self, sessions: int, txns_per_session: int, max_key: int, cases: int):
+        self.sessions = sessions
+        self.txns_per_session = txns_per_session
         self.max_key = max_key
         self.cases = cases
         self.random = random.Random()
+
+    @property
+    def total_txns(self) -> int:
+        return self.sessions * self.txns_per_session
         
     def get_project_dir(self) -> Path:
         """Get project root directory"""
@@ -173,39 +179,78 @@ class WorkloadGenerator:
                     self.random.seed(case_num)
                     
                     transactions = []
-                    
-                    # Instantiate each template according to its percentage
+                    template_counters = {}
+
+                    # Use weighted random template selection to generate exactly total_txns transactions
+                    weighted_templates = []
                     for template in templates:
+                        weighted_templates.append({
+                            'template': template,
+                            'weight': max(0.0, float(template.get('percentage', 0.0)))
+                        })
+
+                    total_weight = sum(item['weight'] for item in weighted_templates)
+                    if total_weight <= 0:
+                        # Fallback to uniform distribution when percentages are invalid
+                        for item in weighted_templates:
+                            item['weight'] = 1.0
+                        total_weight = float(len(weighted_templates))
+
+                    cumulative_weights = []
+                    running = 0.0
+                    for item in weighted_templates:
+                        running += item['weight']
+                        cumulative_weights.append(running)
+
+                    for _ in range(self.total_txns):
+                        pick = self.random.uniform(0, total_weight)
+                        selected_idx = 0
+                        while selected_idx < len(cumulative_weights) and pick > cumulative_weights[selected_idx]:
+                            selected_idx += 1
+                        if selected_idx >= len(weighted_templates):
+                            selected_idx = len(weighted_templates) - 1
+
+                        template = weighted_templates[selected_idx]['template']
                         name = template.get('name', 'unknown')
                         isolation_level = template.get('isolationLevel', 'SERIALIZABLE')
-                        percentage = template.get('percentage', 0.05)
                         operations = template.get('operations', [])
-                        params = template.get('params', [])  # Get parameter names
-                        
-                        # Generate instances based on percentage
-                        count = max(1, round(self.total_txns * percentage))
-                        
-                        for i in range(count):
-                            # Generate random parameter values for this instance
-                            param_values = {}
-                            for param_name in params:
-                                param_values[param_name] = self.random.randint(1, self.max_key)
-                            
-                            txn_name = f"{name}_{i + 1}"
-                            concrete_ops = self.instantiate_template(operations, param_values)
-                            
-                            transactions.append({
-                                'name': txn_name,
-                                'isolationLevel': isolation_level,
-                                'operations': concrete_ops
-                            })
+                        params = template.get('params', [])
+
+                        template_counters[name] = template_counters.get(name, 0) + 1
+
+                        # Generate random parameter values for this instance
+                        param_values = {}
+                        for param_name in params:
+                            param_values[param_name] = self.random.randint(1, self.max_key)
+
+                        txn_name = f"{name}_{template_counters[name]}"
+                        concrete_ops = self.instantiate_template(operations, param_values)
+
+                        transactions.append({
+                            'name': txn_name,
+                            'isolationLevel': isolation_level,
+                            'operations': concrete_ops
+                        })
                     
                     # Shuffle transactions
                     self.random.shuffle(transactions)
+
+                    # Split into sessions (each session has txns_per_session transactions)
+                    sessions = []
+                    for session_idx in range(self.sessions):
+                        start = session_idx * self.txns_per_session
+                        end = start + self.txns_per_session
+                        sessions.append({
+                            'id': session_idx + 1,
+                            'transactions': transactions[start:end]
+                        })
                     
                     # Save workload
-                    workload = {'templates': transactions}
-                    output_file = bench_workload_dir / f"{benchmark_name}_{self.total_txns}t_{self.max_key}k_{case_num}.json"
+                    workload = {'sessions': sessions}
+                    output_file = bench_workload_dir / (
+                        f"{benchmark_name}_{self.sessions}s_{self.txns_per_session}t_"
+                        f"{self.max_key}k_{case_num}.json"
+                    )
                     
                     with open(output_file, 'w', encoding='utf-8') as f:
                         json.dump(workload, f, indent=2)
@@ -233,40 +278,51 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Generate 1 workload with 10000 transactions, 100 max keys
-  python generate_bench_workload.py --txns 10000 --max-key 100 --cases 1
+  # Generate 1 workload: 10 sessions, 1000 txns per session, 100 max keys
+  python generate_bench_workload.py --sessions 10 --txns-per-session 1000 --max-key 100 --cases 1
   
   # Generate 20 workloads for benchmark
-  python generate_bench_workload.py --txns 10000 --max-key 100 --cases 20
+  python generate_bench_workload.py --sessions 10 --txns-per-session 1000 --max-key 100 --cases 20
         '''
     )
     
     parser.add_argument(
-        '--txns',
+        '--sessions',
         type=int,
-        default=10000,
-        help='Total number of transactions (default: 10000)'
+        default=3,
+        help='Number of sessions in each workload'
+    )
+
+    parser.add_argument(
+        '--txns-per-session',
+        type=int,
+        default=100,
+        help='Number of transactions per session'
     )
     
     parser.add_argument(
         '-k', '--max-key',
         type=int,
-        default=1000,
-        help='Maximum key ID (default: 1000)'
+        default=50,
+        help='Maximum key ID'
     )
     
     parser.add_argument(
         '-c', '--cases',
         type=int,
-        default=20,
-        help='Number of different workload cases to generate (default: 20)'
+        default=3,
+        help='Number of different workload cases to generate'
     )
     
     args = parser.parse_args()
     
     # Validate arguments
-    if args.txns <= 0:
-        print(f"{RED}Error: txns must be positive{NC}")
+    if args.sessions <= 0:
+        print(f"{RED}Error: sessions must be positive{NC}")
+        return 1
+
+    if args.txns_per_session <= 0:
+        print(f"{RED}Error: txns_per_session must be positive{NC}")
         return 1
     
     if args.max_key <= 0:
@@ -278,7 +334,8 @@ Examples:
         return 1
     
     generator = WorkloadGenerator(
-        total_txns=args.txns,
+        sessions=args.sessions,
+        txns_per_session=args.txns_per_session,
         max_key=args.max_key,
         cases=args.cases
     )
