@@ -1,12 +1,9 @@
-# Artifact and Technical Report for `On Mixing Database Isolation Levels`
-
-Technical Report: [`tech-rpt.pdf`](tech-rpt.pdf).
+# Artifact for `On Mixing Database Isolation Levels`
 
 ## Directory Organization
 
 ```plain
 /MixIso
-|-- tech-rpt.pdf            # the accompanying technical report
 |-- README.md
 |-- pom.xml                 # Maven project configuration
 |-- src/                    # Java source code for MixIso allocator
@@ -29,7 +26,6 @@ Technical Report: [`tech-rpt.pdf`](tech-rpt.pdf).
 
 - **Java 17** or above is recommended.
 - **Maven** for building the Java project.
-- **Python 3.10+** is optional (legacy scripts only).
 
 ### Build with Maven
 
@@ -58,7 +54,7 @@ All major automation workflows previously in `scripts/*.py` now have Java CLI eq
 
 ```sh
 # 1) Generate benchmark workloads (replaces generate_bench_workload.py)
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 3 --txns-per-session 100 --max-key 50 --cases 3
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 10 --txns-per-session 2 --max-key 50 --cases 3
 
 # 2) Batch allocate benchmark workloads (replaces allocate_bench_workload.py)
 java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadAllocatorBatch
@@ -73,9 +69,6 @@ java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadGenerator 
 # 5) Batch allocate random workloads with timing CSV (replaces allocate_random_workload.py)
 java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadAllocatorBatch
 # -> outputs: data/allocation_performance.csv, data/allocation_performance_analysis.csv, data/allocation_performance.png
-
-# 6) Run random workload experiment orchestration (replaces random_workload_for_test.py)
-java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadExperiment
 ```
 
 ## Task Guide (Recommended)
@@ -142,12 +135,80 @@ Output:
 Python scripts in `scripts/` are kept for compatibility and quick prototyping.
 The Java CLI workflow above is the primary and recommended path.
 
-## Reproduce Experiments
+## Evaluation
 
-### Q1: Benchmark Workload Allocation
+This section describes how to reproduce the evaluation from the paper "On Mixing Database Isolation Levels".
 
-Use **Task A** in the section above.
+### Research Questions
 
-### Q2: Random Workload Allocation & Performance Analysis
+The evaluation addresses three key research questions:
 
-Use **Task B** and **Task C** in the section above.
+1. **Q1: Effectiveness** — Can our allocator safely allocate weaker isolation levels than existing approaches while preserving serializability?
+
+2. **Q2: Efficiency** — How efficient is our allocator in computing isolation level allocations on large workloads?
+
+3. **Q3: System Performance** — To what extent do the weaker isolation levels assigned by our allocator translate into performance gains in database systems?
+
+### Benchmarks
+
+We use three representative OLTP benchmarks:
+
+- **SmallBank**: Bank transaction workload with balance queries, deposits, and transfers
+- **TPC-C**: Industry standard wholesale distribution business workload
+- **Courseware**: University course enrollment system workload
+
+### Reproduce Experiments
+
+#### Q1: Benchmark Workload Allocation & Execution
+
+Use **Task A** to generate benchmark workloads, allocate isolation levels, and execute them with distributed simulation:
+
+```sh
+# 1) Generate benchmark workloads
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 3 --txns-per-session 100 --max-key 50 --cases 3
+
+# 2) Allocate isolation levels in batch
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadAllocatorBatch
+
+# 3) Execute allocated benchmark workloads with distributed simulation
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
+```
+
+**Output**: Distribution of isolation levels across program instances in each benchmark at `data/bench_allocation_distribution.csv`.
+
+#### Q2: Allocation Efficiency on Random Workloads
+
+Use **Task B** and **Task C** to evaluate the allocator's scalability by varying workload parameters:
+
+```sh
+# 1) Generate random workloads with default parameters
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadGenerator --txns 500 --max-ops 10 --max-key 500000 --read-only 30 --cases 5
+
+# 2) Allocate all random workloads and measure timing
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadAllocatorBatch
+
+# 3) Run controlled experiment sweep with parameter variations
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadExperiment
+```
+
+**Output**: Allocation timing and performance metrics at `data/allocation_performance.csv` and `data/allocation_performance_analysis.csv`.
+
+To measure scalability across different parameters:
+- Vary transaction count by adjusting `--txns` parameter
+- Vary operations per transaction by adjusting `--max-ops` parameter
+- Vary key space size by adjusting `--max-key` parameter
+
+#### Q3: System Performance with Mixed Isolation Levels
+
+Execute **Task A** (specifically step 3) to measure throughput and latency improvements from fine-grained isolation level allocation:
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
+```
+
+This executes the allocated workloads in a simulated distributed setting (5 data centers with 100–300ms WAN latencies) and reports throughput and latency metrics.
+
+**Output**: Execution statistics at `data/bench_execution_results.csv`, including:
+- Throughput (transactions per second)
+- Latency (average transaction completion time)
+- Commit/abort rates per isolation level

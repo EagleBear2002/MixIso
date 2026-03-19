@@ -36,8 +36,10 @@ public class BenchWorkloadExecutorBatch {
 
 		int ok = 0;
 		int fail = 0;
-		for (Path file : files) {
+		for (int i = 0; i < files.size(); i++) {
+			Path file = files.get(i);
 			try {
+				System.out.printf("[RUN] (%d/%d) %s%n", i + 1, files.size(), file.getFileName());
 				ExecutionResult result = Executor.runSingleWorkload(file.toString(), csvPath.toString(), dcCount, minRtt, maxRtt);
 				ok++;
 				System.out.printf("[OK] %s committed=%d aborted=%d throughput=%.2f%n",

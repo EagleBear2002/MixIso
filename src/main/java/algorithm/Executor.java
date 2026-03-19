@@ -41,8 +41,8 @@ import java.util.regex.Pattern;
 
 public class Executor {
 	private static final int DEFAULT_DC_COUNT = 5;
-	private static final int DEFAULT_MIN_RTT_MS = 100;
-	private static final int DEFAULT_MAX_RTT_MS = 300;
+	private static final int DEFAULT_MIN_RTT_MS = 1;
+	private static final int DEFAULT_MAX_RTT_MS = 3;
 	private static final long TX_TIMEOUT_SECONDS = 120;
 
 	private final List<DataCenterNode> dataCenters;
@@ -277,27 +277,21 @@ public class Executor {
 			return context.getBuffer().get(key);
 		}
 
-		boolean snapshotRead = isSnapshotStyle(context.getLevel());
-		long visibleTs = snapshotRead ? context.getSts() : Long.MAX_VALUE;
-		return localDc.readVisibleValue(key, visibleTs);
-	}
-
-	private boolean isSnapshotStyle(IsolationLevel level) {
-		return level == IsolationLevel.SERIALIZABLE
-				|| level == IsolationLevel.SNAPSHOT_ISOLATION
-				|| level == IsolationLevel.PREFIX_CONSISTENCY
-				|| level == IsolationLevel.PARALLEL_SNAPSHOT_ISOLATION;
+		return localDc.readVisibleValue(key, context.getSts());
 	}
 
 	private boolean tryCommit(int dataCenterId, TxContext context, Set<String> readSet, Set<String> writeSet) {
 		long cts = logicalClock.incrementAndGet();
+		IsolationLevel level = context.getLevel();
 
-		if (context.getLevel() == IsolationLevel.SNAPSHOT_ISOLATION && hasWindowConflict(context.getSts(), cts, readSet, writeSet, false)) {
-			return false;
-		}
-
-		if (context.getLevel() == IsolationLevel.SERIALIZABLE && hasWindowConflict(context.getSts(), cts, readSet, writeSet, true)) {
-			return false;
+		if (level == IsolationLevel.SNAPSHOT_ISOLATION || level == IsolationLevel.PARALLEL_SNAPSHOT_ISOLATION) {
+			if (hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, false)) {
+				return false;
+			}
+		} else if (level == IsolationLevel.SERIALIZABLE) {
+			if (hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, true)) {
+				return false;
+			}
 		}
 
 		commitLog.add(new CommitRecord(context.getSts(), cts, readSet, writeSet));
@@ -309,21 +303,15 @@ public class Executor {
 							 long cts,
 							 Set<String> readSet,
 							 Set<String> writeSet,
-							 boolean strictSerializable) {
+							 boolean checkWw,
+							 boolean checkWr) {
 		for (CommitRecord record : commitLog) {
 			if (record.getCts() > sts && record.getCts() < cts) {
-				boolean rw = !Collections.disjoint(record.getWriteSet(), readSet);
 				boolean ww = !Collections.disjoint(record.getWriteSet(), writeSet);
 				boolean wr = !Collections.disjoint(writeSet, record.getReadSet());
 
-				if (strictSerializable) {
-					if (rw || ww || wr) {
-						return true;
-					}
-				} else {
-					if (rw || ww) {
-						return true;
-					}
+				if ((checkWw && ww) || (checkWr && wr)) {
+					return true;
 				}
 			}
 		}
