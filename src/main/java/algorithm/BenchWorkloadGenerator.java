@@ -104,55 +104,68 @@ public class BenchWorkloadGenerator {
 
 	private List<ProgramInstance> instantiateTransactions(ArrayNode templates, int totalTxns) {
 		List<WeightedTemplate> weighted = new ArrayList<>();
-		for (JsonNode template : templates) {
+		for (int i = 0; i < templates.size(); i++) {
+			JsonNode template = templates.get(i);
 			double weight = template.path("percentage").asDouble(0.0);
-			weighted.add(new WeightedTemplate(template, Math.max(0.0, weight)));
+			weighted.add(new WeightedTemplate(template, Math.max(0.0, weight), i));
 		}
 
 		double totalWeight = weighted.stream().mapToDouble(w -> w.weight).sum();
-		if (totalWeight <= 0) {
+		if (totalWeight <= 0.0) {
 			for (WeightedTemplate w : weighted) {
 				w.weight = 1.0;
 			}
 			totalWeight = weighted.size();
 		}
 
-		double[] cumulative = new double[weighted.size()];
-		double running = 0.0;
-		for (int i = 0; i < weighted.size(); i++) {
-			running += weighted.get(i).weight;
-			cumulative[i] = running;
+		int assigned = 0;
+		for (WeightedTemplate w : weighted) {
+			double exact = (w.weight / totalWeight) * totalTxns;
+			w.baseCount = (int) Math.floor(exact);
+			w.remainder = exact - w.baseCount;
+			assigned += w.baseCount;
 		}
 
-		Map<String, Integer> nameCounter = new HashMap<>();
-		List<ProgramInstance> txns = new ArrayList<>();
-		for (int i = 0; i < totalTxns; i++) {
-			double pick = random.nextDouble() * totalWeight;
-			int idx = 0;
-			while (idx < cumulative.length && pick > cumulative[idx]) {
-				idx++;
+		int remaining = totalTxns - assigned;
+		weighted.sort((a, b) -> {
+			int cmp = Double.compare(b.remainder, a.remainder);
+			if (cmp != 0) {
+				return cmp;
 			}
-			if (idx >= weighted.size()) {
-				idx = weighted.size() - 1;
-			}
+			return Integer.compare(a.index, b.index);
+		});
+		for (int i = 0; i < remaining; i++) {
+			weighted.get(i % weighted.size()).baseCount++;
+		}
 
-			JsonNode template = weighted.get(idx).template;
+		weighted.sort(Comparator.comparingInt(w -> w.index));
+
+		Map<String, Integer> nameCounter = new HashMap<>();
+		List<ProgramInstance> txns = new ArrayList<>(totalTxns);
+		for (WeightedTemplate w : weighted) {
+			JsonNode template = w.template;
 			String name = template.path("name").asText("unknown");
 			IsolationLevel level = IsolationLevel.valueOf(template.path("isolationLevel").asText("SERIALIZABLE"));
 			ArrayNode operations = (ArrayNode) template.path("operations");
 			JsonNode paramsNode = template.path("params");
 
-			Map<String, Integer> paramValues = new HashMap<>();
-			if (paramsNode.isArray()) {
-				for (JsonNode p : paramsNode) {
-					paramValues.put(p.asText(), random.nextInt(maxKey) + 1);
+			for (int n = 0; n < w.baseCount; n++) {
+				Map<String, Integer> paramValues = new HashMap<>();
+				if (paramsNode.isArray()) {
+					for (JsonNode p : paramsNode) {
+						paramValues.put(p.asText(), random.nextInt(maxKey) + 1);
+					}
 				}
-			}
 
-			List<StaticOperation> concreteOps = instantiateOps(operations, paramValues);
-			int seq = nameCounter.getOrDefault(name, 0) + 1;
-			nameCounter.put(name, seq);
-			txns.add(new ProgramInstance(name + "_" + seq, level, concreteOps));
+				List<StaticOperation> concreteOps = instantiateOps(operations, paramValues);
+				int seq = nameCounter.getOrDefault(name, 0) + 1;
+				nameCounter.put(name, seq);
+				txns.add(new ProgramInstance(name + "_" + seq, level, concreteOps));
+			}
+		}
+
+		if (txns.size() != totalTxns) {
+			throw new IllegalStateException("Strict ratio allocation failed: expected " + totalTxns + " but got " + txns.size());
 		}
 
 		return txns;
@@ -212,10 +225,16 @@ public class BenchWorkloadGenerator {
 	private static class WeightedTemplate {
 		JsonNode template;
 		double weight;
+		double remainder;
+		int baseCount;
+		int index;
 
-		WeightedTemplate(JsonNode template, double weight) {
+		WeightedTemplate(JsonNode template, double weight, int index) {
 			this.template = template;
 			this.weight = weight;
+			this.remainder = 0.0;
+			this.baseCount = 0;
+			this.index = index;
 		}
 	}
 }
