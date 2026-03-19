@@ -1,5 +1,6 @@
 package model;
 
+import java.util.ArrayList;
 import java.util.List;
 
 // 添加Jackson ObjectMapper依赖
@@ -7,17 +8,38 @@ import java.util.List;
 
 public class TemplateSet {
 	private List<ProgramInstance> templates;
+	private List<WorkloadSession> sessions;
 
 	public TemplateSet(List<ProgramInstance> templates) {
 		this.templates = templates;
+		this.sessions = null;
 	}
 
 	public TemplateSet() {
 		this.templates = null;
+		this.sessions = null;
 	}
 
 	public List<ProgramInstance> getTemplates() {
+		if (templates != null) {
+			return templates;
+		}
+
+		if (sessions != null) {
+			List<ProgramInstance> flattened = new ArrayList<>();
+			for (WorkloadSession session : sessions) {
+				if (session.getTransactions() != null) {
+					flattened.addAll(session.getTransactions());
+				}
+			}
+			return flattened;
+		}
+
 		return templates;
+	}
+
+	public List<WorkloadSession> getSessions() {
+		return sessions;
 	}
 
 	public String toString() {

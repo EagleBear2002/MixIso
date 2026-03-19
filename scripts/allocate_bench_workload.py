@@ -110,6 +110,43 @@ def allocate_file(input_file, output_file, classpath, debug=False):
     except Exception as e:
         return (filename, False, str(e))
 
+def extract_transactions(workload_data):
+    """
+    Extract flattened transaction list from workload JSON.
+    Compatible with multiple formats:
+    1) {'templates': [...]} (legacy)
+    2) {'sessions': [{'id': x, 'transactions': [...]}]} (current)
+    3) {'threads': [{'id': x, 'transactions': [...]}]} (older transitional)
+    """
+    if not isinstance(workload_data, dict):
+        return []
+
+    templates = workload_data.get('templates')
+    if isinstance(templates, list):
+        return templates
+
+    sessions = workload_data.get('sessions')
+    if isinstance(sessions, list):
+        txns = []
+        for session in sessions:
+            if isinstance(session, dict):
+                session_txns = session.get('transactions', [])
+                if isinstance(session_txns, list):
+                    txns.extend(session_txns)
+        return txns
+
+    threads = workload_data.get('threads')
+    if isinstance(threads, list):
+        txns = []
+        for thread in threads:
+            if isinstance(thread, dict):
+                thread_txns = thread.get('transactions', [])
+                if isinstance(thread_txns, list):
+                    txns.extend(thread_txns)
+        return txns
+
+    return []
+
 def create_allocation_plots(allocated_dir):
     """
     Create visualization plots for the isolation level allocation results
@@ -164,7 +201,7 @@ def create_allocation_plots(allocated_dir):
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                templates = data.get('templates', [])
+                templates = extract_transactions(data)
                 total = len(templates)
                 
                 counts = {lvl: 0 for lvl in levels}
