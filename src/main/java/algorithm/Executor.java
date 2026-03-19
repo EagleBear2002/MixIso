@@ -21,6 +21,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -49,18 +50,31 @@ public class Executor {
 	private final int minRttMs;
 	private final int maxRttMs;
 	private final AtomicLong logicalClock;
+	private final AtomicLong txnIdGenerator;
 	private final CopyOnWriteArrayList<CommitRecord> commitLog;
+	private final Object godLock;
+	private final Set<Long> committedTransactions;
+	private final Map<Long, Set<Long>> visibleToTxn;
+	private final Map<Long, Long> commitTimestampByTxn;
+	private final Map<Integer, Set<Long>> replicaVisibleTransactions;
 	private final Random rttRandom;
 
 	private Executor(int dcCount, int minRttMs, int maxRttMs) {
 		this.minRttMs = minRttMs;
 		this.maxRttMs = maxRttMs;
 		this.logicalClock = new AtomicLong(0L);
+		this.txnIdGenerator = new AtomicLong(0L);
 		this.commitLog = new CopyOnWriteArrayList<>();
+		this.godLock = new Object();
+		this.committedTransactions = new HashSet<>();
+		this.visibleToTxn = new HashMap<>();
+		this.commitTimestampByTxn = new HashMap<>();
+		this.replicaVisibleTransactions = new HashMap<>();
 		this.rttRandom = new Random(42L);
 		this.dataCenters = new ArrayList<>();
 		for (int i = 0; i < dcCount; i++) {
 			dataCenters.add(new DataCenterNode(i));
+			replicaVisibleTransactions.put(i, new HashSet<>());
 		}
 	}
 
@@ -243,7 +257,7 @@ public class Executor {
 				continue;
 			}
 			long startMs = System.currentTimeMillis();
-			TxContext context = new TxContext(transaction.getIsolationLevel(), logicalClock.incrementAndGet());
+			TxContext context = beginTransaction(transaction.getIsolationLevel(), dataCenterId);
 
 			Set<String> readSet = new HashSet<>();
 			Set<String> writeSet = new HashSet<>();
@@ -271,6 +285,16 @@ public class Executor {
 		}
 	}
 
+	private TxContext beginTransaction(IsolationLevel level, int originDcId) {
+		synchronized (godLock) {
+			long txId = txnIdGenerator.incrementAndGet();
+			long sts = logicalClock.incrementAndGet();
+			Set<Long> visibleSnapshot = new HashSet<>(committedTransactions);
+			visibleToTxn.put(txId, new HashSet<>(visibleSnapshot));
+			return new TxContext(level, txId, sts, originDcId, visibleSnapshot);
+		}
+	}
+
 	private int readWithIsolation(int dataCenterId, TxContext context, String key) {
 		DataCenterNode localDc = dataCenters.get(dataCenterId);
 		if (context.getBuffer().containsKey(key)) {
@@ -281,21 +305,79 @@ public class Executor {
 	}
 
 	private boolean tryCommit(int dataCenterId, TxContext context, Set<String> readSet, Set<String> writeSet) {
-		long cts = logicalClock.incrementAndGet();
-		IsolationLevel level = context.getLevel();
+		long cts;
+		synchronized (godLock) {
+			cts = logicalClock.incrementAndGet();
 
-		if (level == IsolationLevel.SNAPSHOT_ISOLATION || level == IsolationLevel.PARALLEL_SNAPSHOT_ISOLATION) {
-			if (hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, false)) {
+			if (!checkTransVis(context)) {
 				return false;
 			}
-		} else if (level == IsolationLevel.SERIALIZABLE) {
-			if (hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, true)) {
+			if (!checkPrefix(context)) {
+				return false;
+			}
+			if (!checkNoConflict(context, cts, readSet, writeSet)) {
+				return false;
+			}
+			if (!checkTotalVis(context)) {
+				return false;
+			}
+
+			commitLog.add(new CommitRecord(context.getTxId(), context.getSts(), cts, readSet, writeSet, context.getOriginDcId()));
+			committedTransactions.add(context.getTxId());
+			commitTimestampByTxn.put(context.getTxId(), cts);
+			visibleToTxn.computeIfAbsent(context.getTxId(), k -> new HashSet<>()).add(context.getTxId());
+			replicaVisibleTransactions.computeIfAbsent(context.getOriginDcId(), k -> new HashSet<>()).add(context.getTxId());
+		}
+
+		dataCenters.get(dataCenterId).applyWrites(context.getBuffer(), cts);
+		replicateCommit(dataCenterId, context.getTxId(), context.getBuffer(), cts);
+		return true;
+	}
+
+	private boolean checkTransVis(TxContext context) {
+		Set<Long> visibleSet = visibleToTxn.getOrDefault(context.getTxId(), Collections.emptySet());
+		return committedTransactions.containsAll(visibleSet);
+	}
+
+	private boolean checkPrefix(TxContext context) {
+		Set<Long> visibleSet = visibleToTxn.getOrDefault(context.getTxId(), Collections.emptySet());
+		for (Long visibleTxnId : visibleSet) {
+			Long visibleTs = commitTimestampByTxn.get(visibleTxnId);
+			if (visibleTs == null) {
+				continue;
+			}
+			for (Long committedTxnId : committedTransactions) {
+				Long committedTs = commitTimestampByTxn.get(committedTxnId);
+				if (committedTs != null && committedTs < visibleTs && !visibleSet.contains(committedTxnId)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private boolean checkNoConflict(TxContext context, long cts, Set<String> readSet, Set<String> writeSet) {
+		IsolationLevel level = context.getLevel();
+		if (level == IsolationLevel.SNAPSHOT_ISOLATION || level == IsolationLevel.PARALLEL_SNAPSHOT_ISOLATION) {
+			return !hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, false);
+		}
+		if (level == IsolationLevel.SERIALIZABLE) {
+			return !hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, true);
+		}
+		return true;
+	}
+
+	private boolean checkTotalVis(TxContext context) {
+		if (context.getLevel() != IsolationLevel.SERIALIZABLE) {
+			return true;
+		}
+
+		Set<Long> visibleSet = visibleToTxn.getOrDefault(context.getTxId(), Collections.emptySet());
+		for (CommitRecord record : commitLog) {
+			if (record.getCts() <= context.getSts() && !visibleSet.contains(record.getTxId())) {
 				return false;
 			}
 		}
-
-		commitLog.add(new CommitRecord(context.getSts(), cts, readSet, writeSet));
-		replicateWrites(dataCenterId, context.getBuffer(), cts);
 		return true;
 	}
 
@@ -318,13 +400,17 @@ public class Executor {
 		return false;
 	}
 
-	private void replicateWrites(int originDcId, Map<String, Integer> writes, long commitTs) {
+	private void replicateCommit(int originDcId, long txId, Map<String, Integer> writes, long commitTs) {
 		List<Future<Void>> futures = new ArrayList<>();
 		for (DataCenterNode targetDc : dataCenters) {
+			if (targetDc.getId() == originDcId) {
+				continue;
+			}
 			int rtt = randomRttMs();
 			Future<Void> future = targetDc.getExecutor().submit(() -> {
 				sleepMillis(rtt);
 				targetDc.applyWrites(writes, commitTs);
+				markReplicaVisible(targetDc.getId(), txId);
 				return null;
 			});
 			futures.add(future);
@@ -339,6 +425,12 @@ public class Executor {
 			} catch (ExecutionException | TimeoutException e) {
 				throw new IllegalStateException("Replication failed", e);
 			}
+		}
+	}
+
+	private void markReplicaVisible(int replicaId, long txId) {
+		synchronized (godLock) {
+			replicaVisibleTransactions.computeIfAbsent(replicaId, k -> new HashSet<>()).add(txId);
 		}
 	}
 
