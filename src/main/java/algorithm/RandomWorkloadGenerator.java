@@ -1,11 +1,11 @@
 package algorithm;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import model.IsolationLevel;
-import model.OperationType;
-import model.ProgramInstance;
-import model.StaticOperation;
-import model.TemplateSet;
+import model.core.IsolationLevel;
+import model.core.OperationType;
+import model.workload.ProgramInstance;
+import model.workload.StaticOperation;
+import model.workload.TemplateSet;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

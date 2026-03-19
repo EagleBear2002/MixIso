@@ -3,9 +3,9 @@ package algorithm;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import model.IsolationLevel;
-import model.ProgramInstance;
-import model.TemplateSet;
+import model.core.IsolationLevel;
+import model.workload.ProgramInstance;
+import model.workload.TemplateSet;
 
 import java.io.FileWriter;
 import java.io.IOException;

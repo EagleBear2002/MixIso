@@ -1,7 +1,8 @@
-package model;
+package model.workload;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import model.core.IsolationLevel;
 
 import java.util.List;
 import java.util.Objects;

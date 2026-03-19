@@ -1,4 +1,6 @@
-package model;
+package model.execution;
+
+import model.core.IsolationLevel;
 
 import java.util.HashMap;
 import java.util.Map;

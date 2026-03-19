@@ -1,4 +1,4 @@
-package model;
+package model.workload;
 
 import java.util.List;
 import java.util.regex.Matcher;

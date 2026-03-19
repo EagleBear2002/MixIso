@@ -1,6 +1,6 @@
 package algorithm;
 
-import model.ExecutionResult;
+import model.execution.ExecutionResult;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

@@ -1,4 +1,4 @@
-package model;
+package model.execution;
 
 public class ExecutionResult {
 	private final String fileName;

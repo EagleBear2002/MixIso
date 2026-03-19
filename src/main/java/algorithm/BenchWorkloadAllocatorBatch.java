@@ -1,8 +1,8 @@
 package algorithm;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import model.ProgramInstance;
-import model.TemplateSet;
+import model.workload.ProgramInstance;
+import model.workload.TemplateSet;
 
 import java.io.FileWriter;
 import java.io.PrintWriter;

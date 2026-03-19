@@ -4,11 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import model.IsolationLevel;
-import model.OperationType;
-import model.ProgramInstance;
-import model.StaticOperation;
-import model.WorkloadSession;
+import model.core.IsolationLevel;
+import model.core.OperationType;
+import model.workload.ProgramInstance;
+import model.workload.StaticOperation;
 
 import java.io.IOException;
 import java.nio.file.Files;

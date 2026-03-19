@@ -1,4 +1,8 @@
-package model;
+package model.execution;
+
+import model.workload.ProgramInstance;
+import model.workload.StaticOperation;
+import model.workload.WorkloadSession;
 
 import java.util.List;
 import java.util.Map;
