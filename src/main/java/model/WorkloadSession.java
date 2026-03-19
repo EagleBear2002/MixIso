@@ -4,23 +4,23 @@ import java.util.List;
 
 public class WorkloadSession {
 	private int id;
-	private List<ProgramInstance> transactions;
+	private List<ProgramInstance> instances;
 
 	public WorkloadSession() {
 		this.id = 0;
-		this.transactions = null;
+		this.instances = null;
 	}
 
-	public WorkloadSession(int id, List<ProgramInstance> transactions) {
+	public WorkloadSession(int id, List<ProgramInstance> instances) {
 		this.id = id;
-		this.transactions = transactions;
+		this.instances = instances;
 	}
 
 	public int getId() {
 		return id;
 	}
 
-	public List<ProgramInstance> getTransactions() {
-		return transactions;
+	public List<ProgramInstance> getInstances() {
+		return instances;
 	}
 }

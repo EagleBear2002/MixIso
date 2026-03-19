@@ -1,0 +1,425 @@
+package algorithm;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import model.CommitRecord;
+import model.DataCenterNode;
+import model.ExecutionResult;
+import model.IsolationLevel;
+import model.ProgramInstance;
+import model.StaticOperation;
+import model.TemplateSet;
+import model.TxContext;
+import model.WorkloadMeta;
+import model.WorkloadSession;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class Executor {
+	private static final int DEFAULT_DC_COUNT = 5;
+	private static final int DEFAULT_MIN_RTT_MS = 100;
+	private static final int DEFAULT_MAX_RTT_MS = 300;
+	private static final long TX_TIMEOUT_SECONDS = 120;
+
+	private final List<DataCenterNode> dataCenters;
+	private final int minRttMs;
+	private final int maxRttMs;
+	private final AtomicLong logicalClock;
+	private final CopyOnWriteArrayList<CommitRecord> commitLog;
+	private final Random rttRandom;
+
+	private Executor(int dcCount, int minRttMs, int maxRttMs) {
+		this.minRttMs = minRttMs;
+		this.maxRttMs = maxRttMs;
+		this.logicalClock = new AtomicLong(0L);
+		this.commitLog = new CopyOnWriteArrayList<>();
+		this.rttRandom = new Random(42L);
+		this.dataCenters = new ArrayList<>();
+		for (int i = 0; i < dcCount; i++) {
+			dataCenters.add(new DataCenterNode(i));
+		}
+	}
+
+	public static void main(String[] args) {
+		if (args.length < 2) {
+			System.err.println("Usage: Executor <allocated_workload_file> <output_csv> [dcCount] [minRttMs] [maxRttMs]");
+			System.err.println("Example: Executor data/allocated_bench_workload/Courseware_10s_20t_500k_1.json data/bench_execution_results.csv 5 100 300");
+			System.exit(1);
+		}
+
+		String workloadFile = args[0];
+		String outputCsv = args[1];
+		int dcCount = args.length >= 3 ? Integer.parseInt(args[2]) : DEFAULT_DC_COUNT;
+		int minRtt = args.length >= 4 ? Integer.parseInt(args[3]) : DEFAULT_MIN_RTT_MS;
+		int maxRtt = args.length >= 5 ? Integer.parseInt(args[4]) : DEFAULT_MAX_RTT_MS;
+
+		if (dcCount <= 0 || minRtt < 0 || maxRtt < minRtt) {
+			System.err.println("Invalid parameters: dcCount > 0, minRtt >= 0, maxRtt >= minRtt are required");
+			System.exit(1);
+		}
+
+		Executor engine = new Executor(dcCount, minRtt, maxRtt);
+		try {
+			ExecutionResult result = engine.executeWorkloadFile(workloadFile);
+			appendCsv(outputCsv, result);
+			System.out.printf("Execution completed: %s | committed=%d aborted=%d throughput=%.2f tx/s avgLatency=%.2f ms%n",
+					result.getFileName(), result.getCommittedTxns(), result.getAbortedTxns(), result.getThroughputTxPerSec(), result.getAvgLatencyMs());
+		} catch (Exception e) {
+			System.err.println("Execution failed: " + e.getMessage());
+			e.printStackTrace();
+			System.exit(1);
+		} finally {
+			engine.shutdown();
+		}
+	}
+
+	private static void appendCsv(String outputCsv, ExecutionResult result) throws IOException {
+		Path outputPath = Paths.get(outputCsv);
+		Path parent = outputPath.getParent();
+		if (parent != null) {
+			Files.createDirectories(parent);
+		}
+
+		boolean fileExists = Files.exists(outputPath);
+		try (PrintWriter writer = new PrintWriter(new FileWriter(outputCsv, true))) {
+			if (!fileExists) {
+				writer.println("file,benchmark,sessions,txns_per_session,max_key,case_num,total_txns,committed,aborted,throughput_tx_per_sec,avg_latency_ms,p95_latency_ms,dc_count,min_rtt_ms,max_rtt_ms");
+			}
+			writer.printf("%s,%s,%d,%d,%d,%d,%d,%d,%d,%.4f,%.4f,%.4f,%d,%d,%d%n",
+					result.getFileName(),
+					result.getBenchmark(),
+					result.getSessions(),
+					result.getTxnsPerSession(),
+					result.getMaxKey(),
+					result.getCaseNum(),
+					result.getTotalTxns(),
+					result.getCommittedTxns(),
+					result.getAbortedTxns(),
+					result.getThroughputTxPerSec(),
+					result.getAvgLatencyMs(),
+					result.getP95LatencyMs(),
+					result.getDcCount(),
+					result.getMinRttMs(),
+					result.getMaxRttMs());
+		}
+	}
+
+	private ExecutionResult executeWorkloadFile(String workloadFile) throws IOException, InterruptedException {
+		Path workloadPath = Paths.get(workloadFile);
+		if (!Files.exists(workloadPath)) {
+			throw new IOException("Workload file not found: " + workloadFile);
+		}
+
+		ObjectMapper mapper = new ObjectMapper();
+		TemplateSet templateSet = mapper.readValue(workloadPath.toFile(), TemplateSet.class);
+
+		List<WorkloadSession> sessionWorkloads = extractSessions(templateSet, workloadPath.getFileName().toString());
+		if (sessionWorkloads.isEmpty()) {
+			throw new IllegalStateException("No transactions found in workload: " + workloadFile);
+		}
+
+		for (DataCenterNode dataCenter : dataCenters) {
+			dataCenter.seedInitialData(sessionWorkloads);
+		}
+
+		long executionStartMs = System.currentTimeMillis();
+		List<Long> latencies = Collections.synchronizedList(new ArrayList<Long>());
+		AtomicLong committed = new AtomicLong(0L);
+		AtomicLong aborted = new AtomicLong(0L);
+
+		ExecutorService sessionExecutor = Executors.newFixedThreadPool(sessionWorkloads.size());
+		List<Callable<Void>> tasks = new ArrayList<>();
+		for (int index = 0; index < sessionWorkloads.size(); index++) {
+			WorkloadSession session = sessionWorkloads.get(index);
+			int dataCenterId = index % dataCenters.size();
+			tasks.add(() -> {
+				executeSession(session, dataCenterId, latencies, committed, aborted);
+				return null;
+			});
+		}
+
+		try {
+			List<Future<Void>> futures = sessionExecutor.invokeAll(tasks, TX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+			for (Future<Void> future : futures) {
+				if (!future.isCancelled()) {
+					try {
+						future.get();
+					} catch (ExecutionException e) {
+						throw new IllegalStateException("Session execution error", e.getCause());
+					}
+				} else {
+					throw new TimeoutException("Session execution timed out");
+				}
+			}
+		} catch (TimeoutException e) {
+			throw new IllegalStateException(e.getMessage(), e);
+		} finally {
+			sessionExecutor.shutdownNow();
+		}
+
+		long executionEndMs = System.currentTimeMillis();
+		long wallMs = Math.max(1L, executionEndMs - executionStartMs);
+
+		double avgLatency = latencies.stream().mapToLong(v -> v).average().orElse(0.0);
+		double p95Latency = percentile(latencies, 95.0);
+		double throughput = (committed.get() * 1000.0) / wallMs;
+
+		WorkloadMeta meta = WorkloadMeta.fromFilename(workloadPath.getFileName().toString(), sessionWorkloads);
+
+		return new ExecutionResult(
+				workloadPath.getFileName().toString(),
+				meta.getBenchmark(),
+				meta.getSessions(),
+				meta.getTxnsPerSession(),
+				meta.getMaxKey(),
+				meta.getCaseNum(),
+				meta.getTotalTxns(),
+				committed.get(),
+				aborted.get(),
+				throughput,
+				avgLatency,
+				p95Latency,
+				dataCenters.size(),
+				minRttMs,
+				maxRttMs);
+	}
+
+	private void executeSession(WorkloadSession session,
+								int dataCenterId,
+								List<Long> latencies,
+								AtomicLong committed,
+								AtomicLong aborted) {
+		List<ProgramInstance> transactions = session.getInstances();
+		if (transactions == null || transactions.isEmpty()) {
+			return;
+		}
+
+		for (ProgramInstance transaction : transactions) {
+			if (transaction == null || transaction.getOperations() == null) {
+				aborted.incrementAndGet();
+				continue;
+			}
+			long startMs = System.currentTimeMillis();
+			TxContext context = new TxContext(transaction.getIsolationLevel(), logicalClock.incrementAndGet());
+
+			Set<String> readSet = new HashSet<>();
+			Set<String> writeSet = new HashSet<>();
+
+			for (StaticOperation operation : transaction.getOperations()) {
+				String key = operation.getKey();
+				if (operation.isWriteOp()) {
+					writeSet.add(key);
+					context.getBuffer().put(key, syntheticValue(key, context.getSts()));
+				} else if (operation.isReadOp()) {
+					readSet.add(key);
+					if (!context.getBuffer().containsKey(key)) {
+						int readValue = readWithIsolation(dataCenterId, context, key);
+						context.setLastReadValue(readValue);
+					}
+				}
+			}
+
+			if (tryCommit(dataCenterId, context, readSet, writeSet)) {
+				committed.incrementAndGet();
+				latencies.add(System.currentTimeMillis() - startMs);
+			} else {
+				aborted.incrementAndGet();
+			}
+		}
+	}
+
+	private int readWithIsolation(int dataCenterId, TxContext context, String key) {
+		DataCenterNode localDc = dataCenters.get(dataCenterId);
+		if (context.getBuffer().containsKey(key)) {
+			return context.getBuffer().get(key);
+		}
+
+		boolean snapshotRead = isSnapshotStyle(context.getLevel());
+		long visibleTs = snapshotRead ? context.getSts() : Long.MAX_VALUE;
+		return localDc.readVisibleValue(key, visibleTs);
+	}
+
+	private boolean isSnapshotStyle(IsolationLevel level) {
+		return level == IsolationLevel.SERIALIZABLE
+				|| level == IsolationLevel.SNAPSHOT_ISOLATION
+				|| level == IsolationLevel.PREFIX_CONSISTENCY
+				|| level == IsolationLevel.PARALLEL_SNAPSHOT_ISOLATION;
+	}
+
+	private boolean tryCommit(int dataCenterId, TxContext context, Set<String> readSet, Set<String> writeSet) {
+		long cts = logicalClock.incrementAndGet();
+
+		if (context.getLevel() == IsolationLevel.SNAPSHOT_ISOLATION && hasWindowConflict(context.getSts(), cts, readSet, writeSet, false)) {
+			return false;
+		}
+
+		if (context.getLevel() == IsolationLevel.SERIALIZABLE && hasWindowConflict(context.getSts(), cts, readSet, writeSet, true)) {
+			return false;
+		}
+
+		commitLog.add(new CommitRecord(context.getSts(), cts, readSet, writeSet));
+		replicateWrites(dataCenterId, context.getBuffer(), cts);
+		return true;
+	}
+
+	private boolean hasWindowConflict(long sts,
+							 long cts,
+							 Set<String> readSet,
+							 Set<String> writeSet,
+							 boolean strictSerializable) {
+		for (CommitRecord record : commitLog) {
+			if (record.getCts() > sts && record.getCts() < cts) {
+				boolean rw = !Collections.disjoint(record.getWriteSet(), readSet);
+				boolean ww = !Collections.disjoint(record.getWriteSet(), writeSet);
+				boolean wr = !Collections.disjoint(writeSet, record.getReadSet());
+
+				if (strictSerializable) {
+					if (rw || ww || wr) {
+						return true;
+					}
+				} else {
+					if (rw || ww) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private void replicateWrites(int originDcId, Map<String, Integer> writes, long commitTs) {
+		List<Future<Void>> futures = new ArrayList<>();
+		for (DataCenterNode targetDc : dataCenters) {
+			int rtt = randomRttMs();
+			Future<Void> future = targetDc.getExecutor().submit(() -> {
+				sleepMillis(rtt);
+				targetDc.applyWrites(writes, commitTs);
+				return null;
+			});
+			futures.add(future);
+		}
+
+		for (Future<Void> future : futures) {
+			try {
+				future.get(TX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new IllegalStateException("Interrupted during replication", e);
+			} catch (ExecutionException | TimeoutException e) {
+				throw new IllegalStateException("Replication failed", e);
+			}
+		}
+	}
+
+	private int syntheticValue(String key, long ts) {
+		return Objects.hash(key, ts);
+	}
+
+	private int randomRttMs() {
+		if (maxRttMs <= minRttMs) {
+			return minRttMs;
+		}
+		return minRttMs + rttRandom.nextInt(maxRttMs - minRttMs + 1);
+	}
+
+	private static void sleepMillis(int millis) {
+		if (millis <= 0) {
+			return;
+		}
+		try {
+			Thread.sleep(millis);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("Interrupted during simulated WAN delay", e);
+		}
+	}
+
+	private static double percentile(List<Long> values, double p) {
+		if (values.isEmpty()) {
+			return 0.0;
+		}
+		List<Long> sorted = new ArrayList<>(values);
+		sorted.sort(Comparator.naturalOrder());
+		double rank = (p / 100.0) * (sorted.size() - 1);
+		int low = (int) Math.floor(rank);
+		int high = (int) Math.ceil(rank);
+		if (low == high) {
+			return sorted.get(low);
+		}
+		double fraction = rank - low;
+		return sorted.get(low) + fraction * (sorted.get(high) - sorted.get(low));
+	}
+
+	private static List<WorkloadSession> extractSessions(TemplateSet templateSet, String fileName) {
+		List<WorkloadSession> sessions = templateSet.getSessions();
+		if (sessions != null && !sessions.isEmpty()) {
+			List<WorkloadSession> mapped = new ArrayList<>();
+			for (WorkloadSession session : sessions) {
+				List<ProgramInstance> txns = session.getInstances() == null ? Collections.emptyList() : session.getInstances();
+				mapped.add(new WorkloadSession(session.getId(), txns));
+			}
+			return mapped;
+		}
+
+		List<ProgramInstance> templates = templateSet.getTemplates();
+		if (templates == null || templates.isEmpty()) {
+			return Collections.emptyList();
+		}
+
+		int inferredSessions = inferSessionsFromFilename(fileName);
+		if (inferredSessions <= 0) {
+			return Collections.singletonList(new WorkloadSession(1, templates));
+		}
+
+		List<WorkloadSession> result = new ArrayList<>();
+		int txnsPerSession = Math.max(1, templates.size() / inferredSessions);
+		for (int i = 0; i < inferredSessions; i++) {
+			int start = i * txnsPerSession;
+			int end = (i == inferredSessions - 1) ? templates.size() : Math.min(templates.size(), start + txnsPerSession);
+			if (start >= templates.size()) {
+				break;
+			}
+			result.add(new WorkloadSession(i + 1, templates.subList(start, end)));
+		}
+		return result;
+	}
+
+	private static int inferSessionsFromFilename(String fileName) {
+		Pattern p = Pattern.compile("^[^_]+_(\\d+)s_(\\d+)t_.*\\.json$");
+		Matcher m = p.matcher(fileName);
+		if (m.matches()) {
+			return Integer.parseInt(m.group(1));
+		}
+		return 0;
+	}
+
+	private void shutdown() {
+		for (DataCenterNode dataCenter : dataCenters) {
+			dataCenter.shutdown();
+		}
+	}
+}

@@ -28,8 +28,8 @@ public class TemplateSet {
 		if (sessions != null) {
 			List<ProgramInstance> flattened = new ArrayList<>();
 			for (WorkloadSession session : sessions) {
-				if (session.getTransactions() != null) {
-					flattened.addAll(session.getTransactions());
+				if (session.getInstances() != null) {
+					flattened.addAll(session.getInstances());
 				}
 			}
 			return flattened;

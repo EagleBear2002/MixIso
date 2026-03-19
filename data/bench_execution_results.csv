@@ -1,0 +1,2 @@
+file,benchmark,sessions,txns_per_session,max_key,case_num,total_txns,committed,aborted,throughput_tx_per_sec,avg_latency_ms,p95_latency_ms,dc_count,min_rtt_ms,max_rtt_ms
+Courseware_3s_100t_50k_1.json,Courseware,3,100,50,1,300,300,0,4.7401,630.3800,782.2000,5,100,300
