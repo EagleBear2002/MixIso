@@ -97,6 +97,25 @@ public class Executor {
 		}
 	}
 
+	public static ExecutionResult runSingleWorkload(String workloadFile,
+													 String outputCsv,
+													 int dcCount,
+													 int minRtt,
+													 int maxRtt) throws Exception {
+		if (dcCount <= 0 || minRtt < 0 || maxRtt < minRtt) {
+			throw new IllegalArgumentException("Invalid parameters: dcCount > 0, minRtt >= 0, maxRtt >= minRtt are required");
+		}
+
+		Executor engine = new Executor(dcCount, minRtt, maxRtt);
+		try {
+			ExecutionResult result = engine.executeWorkloadFile(workloadFile);
+			appendCsv(outputCsv, result);
+			return result;
+		} finally {
+			engine.shutdown();
+		}
+	}
+
 	private static void appendCsv(String outputCsv, ExecutionResult result) throws IOException {
 		Path outputPath = Paths.get(outputCsv);
 		Path parent = outputPath.getParent();

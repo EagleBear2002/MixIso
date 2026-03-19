@@ -20,6 +20,11 @@ public class TemplateSet {
 		this.sessions = null;
 	}
 
+	public TemplateSet(List<ProgramInstance> templates, List<WorkloadSession> sessions) {
+		this.templates = templates;
+		this.sessions = sessions;
+	}
+
 	public List<ProgramInstance> getTemplates() {
 		if (templates != null) {
 			return templates;

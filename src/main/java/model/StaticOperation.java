@@ -1,5 +1,9 @@
 package model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class StaticOperation {
 	private final int id;
 	private final OperationType type;
@@ -29,7 +33,9 @@ public class StaticOperation {
 	public int getId() { return id; }
 	public OperationType getType() { return type; }
 	public String getKey() { return key; }
+	@JsonIgnore
 	public boolean isWriteOp() { return OperationType.WRITE.equals(type) || OperationType.UPDATE.equals(type); }
+	@JsonIgnore
 	public boolean isReadOp() { return OperationType.READ.equals(type) || OperationType.UPDATE.equals(type); }
 	public String toString() {
 		return "{\"id\": " + id + ", \"type\": \"" + type + "\", \"key\": " + key + "}";

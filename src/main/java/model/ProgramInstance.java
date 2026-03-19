@@ -1,48 +1,61 @@
 package model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.HashSet;
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class ProgramInstance {
 	private final String name;
 	private final IsolationLevel isolationLevel;
 	private final List<StaticOperation> operations;
 
+	@JsonIgnore
 	public boolean isSER() {
 		return isolationLevel.equals(IsolationLevel.SERIALIZABLE);
 	}
 
+	@JsonIgnore
 	public boolean isSI() {
 		return isolationLevel.equals(IsolationLevel.SNAPSHOT_ISOLATION);
 	}
 
+	@JsonIgnore
 	public boolean isPC() {
 		return isolationLevel.equals(IsolationLevel.PREFIX_CONSISTENCY);
 	}
 
+	@JsonIgnore
 	public boolean isPSI() {
 		return isolationLevel.equals(IsolationLevel.PARALLEL_SNAPSHOT_ISOLATION);
 	}
 
+	@JsonIgnore
 	public boolean isCC() {
 		return isolationLevel.equals(IsolationLevel.CAUSAL_CONSISTENCY);
 	}
 
+	@JsonIgnore
 	public boolean isRA() {
 		return isolationLevel.equals(IsolationLevel.READ_ATOMIC);
 	}
 
 
+	@JsonIgnore
 	public boolean isReadOnly() {
 		return getWriteSet().isEmpty();
 	}
 
+	@JsonIgnore
 	public boolean isWriteOnly() {
 		return getReadSet().isEmpty();
 	}
 
+	@JsonIgnore
 	public boolean isSingleRead() {
 		return getWriteSet().isEmpty() && getReadSet().size() == 1;
 	}
@@ -68,6 +81,7 @@ public class ProgramInstance {
 		return operations;
 	}
 
+	@JsonIgnore
 	public boolean wwConflict(ProgramInstance txn) {
 		for (StaticOperation op1 : operations) {
 			for (StaticOperation op2 : txn.operations) {
@@ -79,6 +93,7 @@ public class ProgramInstance {
 		return false;
 	}
 
+	@JsonIgnore
 	public boolean wrConflict(ProgramInstance txn) {
 		for (StaticOperation op1 : operations) {
 			for (StaticOperation op2 : txn.operations) {
@@ -94,6 +109,7 @@ public class ProgramInstance {
 		return name;
 	}
 
+	@JsonIgnore
 	public Set<String> getWriteSet() {
 		Set<String> writeSet = new HashSet<>();
 		if (operations != null) {
@@ -106,6 +122,7 @@ public class ProgramInstance {
 		return writeSet;
 	}
 
+	@JsonIgnore
 	public Set<String> getReadSet() {
 		Set<String> readSet = new HashSet<>();
 		if (operations != null) {

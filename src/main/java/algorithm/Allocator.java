@@ -100,7 +100,7 @@ public class Allocator {
 	 * @param outputFile path to output allocated workload JSON file
 	 * @throws IOException if file operations fail
 	 */
-	private static void allocateAndSave(String inputFile, String outputFile) throws IOException {
+	public static void allocateAndSave(String inputFile, String outputFile) throws IOException {
 		// Read input file
 		Path inputPath = Paths.get(inputFile);
 		if (!Files.exists(inputPath)) {

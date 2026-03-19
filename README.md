@@ -29,7 +29,7 @@ Technical Report: [`tech-rpt.pdf`](tech-rpt.pdf).
 
 - **Java 17** or above is recommended.
 - **Maven** for building the Java project.
-- **Python 3.10+** for running automation scripts.
+- **Python 3.10+** is optional (legacy scripts only).
 
 ### Build with Maven
 
@@ -37,7 +37,10 @@ Technical Report: [`tech-rpt.pdf`](tech-rpt.pdf).
 mvn clean package
 ```
 
-### Usage
+> On Windows PowerShell, keep the classpath separator `;`.
+> On Linux/macOS shells, replace it with `:`.
+
+### Core Usage
 
 The core allocation logic is implemented in Java. You can run it directly:
 
@@ -49,53 +52,102 @@ java -cp "target/classes;target/dependency/*" algorithm.Allocator benchmark <wor
 java -cp "target/classes;target/dependency/*" algorithm.Allocator allocate <input_workload> <output_workload>
 ```
 
-Alternatively, use the provided Python scripts in the `scripts/` directory which handle classpath resolution and parallel execution.
+## Java CLI Workflows (Python-free)
+
+All major automation workflows previously in `scripts/*.py` now have Java CLI equivalents:
+
+```sh
+# 1) Generate benchmark workloads (replaces generate_bench_workload.py)
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 3 --txns-per-session 100 --max-key 50 --cases 3
+
+# 2) Batch allocate benchmark workloads (replaces allocate_bench_workload.py)
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadAllocatorBatch
+# -> outputs: data/bench_allocation_distribution.csv and data/bench_allocation_distribution.png
+
+# 3) Batch execute allocated benchmark workloads (replaces execute_allocated_bench.py)
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
+
+# 4) Generate random workloads (replaces generate_random_workload.py)
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadGenerator --txns 500 --max-ops 10 --max-key 500000 --read-only 30 --cases 5
+
+# 5) Batch allocate random workloads with timing CSV (replaces allocate_random_workload.py)
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadAllocatorBatch
+# -> outputs: data/allocation_performance.csv, data/allocation_performance_analysis.csv, data/allocation_performance.png
+
+# 6) Run random workload experiment orchestration (replaces random_workload_for_test.py)
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadExperiment
+```
+
+## Task Guide (Recommended)
+
+This section shows how to complete common tasks end-to-end using Java only.
+
+### Task A: Benchmark workload allocation + execution (Q1)
+
+1. Generate benchmark workloads:
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 3 --txns-per-session 100 --max-key 50 --cases 3
+```
+
+2. Allocate isolation levels in batch (also exports Figure-8 style distribution files):
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadAllocatorBatch
+```
+
+3. Execute all allocated benchmark files with distributed simulation:
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
+```
+
+Outputs:
+- `data/allocated_bench_workload/`
+- `data/bench_allocation_distribution.csv`
+- `data/bench_allocation_distribution.png`
+- `data/bench_execution_results.csv`
+
+### Task B: Random workload allocation + performance analysis (Q2)
+
+1. Generate random workloads:
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadGenerator --txns 500 --max-ops 10 --max-key 500000 --read-only 30 --cases 5
+```
+
+2. Allocate all random workloads and export timing/analysis/plot:
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadAllocatorBatch
+```
+
+Outputs:
+- `data/allocated_random_workload/`
+- `data/allocation_performance.csv`
+- `data/allocation_performance_analysis.csv`
+- `data/allocation_performance.png`
+
+### Task C: Full random experiment sweep (control-variable method)
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadExperiment
+```
+
+Output:
+- `data/allocation_experiment_summary.csv`
+
+## Legacy Python Scripts (Optional)
+
+Python scripts in `scripts/` are kept for compatibility and quick prototyping.
+The Java CLI workflow above is the primary and recommended path.
 
 ## Reproduce Experiments
 
 ### Q1: Benchmark Workload Allocation
 
-This experiment allocates isolation levels for standard benchmarks (Courseware, SmallBank, TPC-C).
-
-- **Scripts**: `scripts/generate_bench_workload.py`, `scripts/allocate_bench_workload.py`
-- **Output**: `data/allocated_bench_workload/`, `data/bench_allocation_distribution.png`, `data/bench_allocation_distribution.csv`
-- **Visualization**: The script generates a **stacked bar chart** (`bench_allocation_distribution.png`) showing the distribution of isolation levels (SER, SI, PSI, PC, RA) across all benchmark instances, corresponding to **Figure 8** in the technical report.
-
-```sh
-# Generate benchmark workloads
-python scripts/generate_bench_workload.py --txns 100 --max-key 500 --cases 3
-
-# Perform allocation (includes visualization generation)
-python scripts/allocate_bench_workload.py
-```
-
-The generated visualization provides insights into:
-- How different benchmarks (SmallBank, Courseware, TPC-C) have distinct isolation level distributions
-- The consistency of allocation decisions across multiple workload instances
-- The preference patterns for different isolation levels in each benchmark
+Use **Task A** in the section above.
 
 ### Q2: Random Workload Allocation & Performance Analysis
 
-This experiment explores the relationship between workload parameters and allocation performance.
-
-- **Scripts**: `scripts/generate_random_workload.py`, `scripts/random_workload_for_test.py`, `scripts/allocate_random_workload.py`
-- **Output**: `data/allocated_random_workload/`, `data/allocation_performance.png`, `data/allocation_performance_analysis.csv`
-- **Visualization**: The script generates a **three-panel performance chart** (`allocation_performance.png`) showing how allocation performance varies with key workload parameters (number of transactions, max operations per transaction, and max key ID), corresponding to **Figure 9** in the technical report.
-
-```sh
-# Generate random workloads
-python scripts/generate_random_workload.py --txns 500 --max-ops 10 --max-key 500 --read-only 50 --cases 5
-
-# Preprocess for testing (includes visualization generation)
-python scripts/random_workload_for_test.py
-
-# Perform allocation
-python scripts/allocate_random_workload.py
-```
-
-The generated visualization provides insights into:
-- Performance trends across different transaction counts
-- Impact of operations complexity on allocation efficiency
-- Relationship between key space size and allocation quality
-
-Results are saved in the `data/` directory. You can check `data/allocation_performance_analysis.csv` for detailed timing information.
+Use **Task B** and **Task C** in the section above.

@@ -1,10 +1,12 @@
+model/ExecutionResult.class
 model/StaticOperation.class
 model/ProgramInstance.class
-algorithm/Executor$DataCenterNode.class
 model/TemplateSet.class
+model/CommitRecord.class
 model/Transaction.class
+model/DataCenterNode.class
+model/Version.class
 algorithm/Executor.class
-algorithm/Executor$ExecutionResult.class
 model/Operation.class
 model/StaticDependencyGraph.class
 model/IsolationLevel.class
@@ -12,10 +14,7 @@ model/Session.class
 algorithm/Allocator.class
 model/Edge.class
 model/WorkloadSession.class
-algorithm/Executor$Version.class
+model/WorkloadMeta.class
 algorithm/Allocator$WorkloadParams.class
-algorithm/Executor$SessionWorkload.class
-algorithm/Executor$CommitRecord.class
 model/OperationType.class
-algorithm/Executor$WorkloadMeta.class
-algorithm/Executor$TxContext.class
+model/TxContext.class
