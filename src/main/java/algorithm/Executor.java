@@ -369,28 +369,30 @@ public class Executor {
 		}
 
 		long commitTs;
-		if (needsArbiterRoundTrip(effectiveLevel, readSet, writeSet)) {
-			// 通过仲裁节点进行冲突检测和提交判定（含通信开销）
-			commitTs = requestArbiterCommitDecision(txId, dcId, effectiveLevel, sts, readSet, writeSet);
+		if (needsConflictCheck(effectiveLevel, readSet, writeSet)) {
+			// 冲突检测集合非空，向其他节点请求冲突检测（1 RTT）
+			commitTs = requestConflictCheckFromPeers(txId, dcId, effectiveLevel, sts, readSet, writeSet);
 		} else {
 			// 冲突检测集合为空，直接本地提交
-			commitTs = localCommitWithoutArbiter(txId, dcId, sts, readSet, writeSet);
+			commitTs = directLocalCommit(txId, dcId, sts, readSet, writeSet);
 		}
 		if (commitTs < 0L) {
 			return false;
 		}
 
-		// 模拟网络延迟并应用写入
-		sleepMillis(randomRttMs());
+		// 本地立刻应用写入
 		dataCenter.applyWrites(new HashMap<>(buffer), commitTs);
 
-		// 传播更新到其他副本
-		propagateToOtherReplicas(dcId, txId, buffer, commitTs);
+		// 异步传播更新到其他副本
+		propagateToOtherReplicasAsync(dcId, txId, buffer, commitTs);
+
+		// 等待1个RTT使更新到达其他节点
+		sleepMillis(randomRttMs());
 
 		return true;
 	}
 
-	private boolean needsArbiterRoundTrip(IsolationLevel level,
+private boolean needsConflictCheck(IsolationLevel level,
 									   Set<String> readSet,
 									   Set<String> writeSet) {
 		if (level == IsolationLevel.SNAPSHOT_ISOLATION) {
@@ -402,11 +404,11 @@ public class Executor {
 		return false;
 	}
 
-	private long localCommitWithoutArbiter(long txId,
-									 int originDcId,
-									 long sts,
-									 Set<String> readSet,
-									 Set<String> writeSet) {
+	private long directLocalCommit(long txId,
+							int originDcId,
+							long sts,
+							Set<String> readSet,
+							Set<String> writeSet) {
 		synchronized (godLock) {
 			long cts = logicalClock.incrementAndGet();
 			commitLog.add(new CommitRecord(txId, sts, cts, readSet, writeSet, originDcId));
@@ -417,41 +419,72 @@ public class Executor {
 		}
 	}
 
-	private long requestArbiterCommitDecision(long txId,
-										 int originDcId,
-										 IsolationLevel level,
-										 long sts,
-										 Set<String> readSet,
-										 Set<String> writeSet) throws InterruptedException {
-		// requester -> arbiter
+	private long requestConflictCheckFromPeers(long txId,
+									   int originDcId,
+									   IsolationLevel level,
+									   long sts,
+									   Set<String> readSet,
+									   Set<String> writeSet) throws InterruptedException {
+		// 请求 -> 其他节点
 		sleepMillis(randomRttMs());
 
-		long decision = arbitrateCommit(txId, originDcId, level, sts, readSet, writeSet);
+		// 收集来自所有其他节点的冲突检测结果
+		boolean conflictDetected = false;
+		for (DataCenterNode dc : dataCenters) {
+			if (dc.getId() == originDcId) {
+				continue;
+			}
+			if (checkConflictLocallyAt(dc, level, sts, readSet, writeSet)) {
+				conflictDetected = true;
+				break;
+			}
+		}
 
-		// arbiter -> requester
+		// 回复 <- 其他节点
 		sleepMillis(randomRttMs());
-		return decision;
-	}
 
-	private long arbitrateCommit(long txId,
-							int originDcId,
-							IsolationLevel level,
-							long sts,
-							Set<String> readSet,
-							Set<String> writeSet) {
+		if (conflictDetected) {
+			return -1L; // abort
+		}
+
+		// 无冲突，在原始节点本地提交
 		synchronized (godLock) {
 			long cts = logicalClock.incrementAndGet();
-
-			if (!checkConflictByLevel(level, sts, cts, readSet, writeSet)) {
-				return -1L;
-			}
-
 			commitLog.add(new CommitRecord(txId, sts, cts, readSet, writeSet, originDcId));
 			committedTransactions.add(txId);
 			commitTimestampByTxn.put(txId, cts);
 			replicaVisibleTransactions.computeIfAbsent(originDcId, k -> ConcurrentHashMap.newKeySet()).add(txId);
-			replicaVisibleTransactions.computeIfAbsent(ARBITER_NODE_ID, k -> ConcurrentHashMap.newKeySet()).add(txId);
 			return cts;
+		}
+	}
+
+	private boolean checkConflictLocallyAt(DataCenterNode dc,
+									  IsolationLevel level,
+									  long sts,
+									  Set<String> readSet,
+									  Set<String> writeSet) {
+		synchronized (godLock) {
+			// 检查所有sts之后提交的事务
+			for (CommitRecord record : commitLog) {
+				if (record.getCts() <= sts) {
+					continue;
+				}
+
+				boolean wwConflict = hasIntersection(writeSet, record.getWriteSet());
+				if (level == IsolationLevel.SNAPSHOT_ISOLATION) {
+					if (wwConflict) {
+						return true;
+					}
+					continue;
+				}
+
+				boolean rwConflict = hasIntersection(readSet, record.getWriteSet());
+				boolean wrConflict = hasIntersection(writeSet, record.getReadSet());
+				if (wwConflict || rwConflict || wrConflict) {
+					return true;
+				}
+			}
+			return false;
 		}
 	}
 
@@ -555,7 +588,7 @@ public class Executor {
 		return true;
 	}
 
-	private void propagateToOtherReplicas(int originDcId, long txId, Map<String, Integer> writes, long commitTs) {
+	private void propagateToOtherReplicasAsync(int originDcId, long txId, Map<String, Integer> writes, long commitTs) {
 		if (writes == null || writes.isEmpty()) {
 			return;
 		}
