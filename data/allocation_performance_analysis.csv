@@ -1,4 +1,0 @@
-vary_param,vary_value,mean,std,count
-txns,500,0.124096,0.088438,5
-max_ops,10,0.124096,0.088438,5
-max_key,500000,0.124096,0.088438,5

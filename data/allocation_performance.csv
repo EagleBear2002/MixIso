@@ -1,6 +1,0 @@
-filename,status,execution_time_seconds,error
-workload_500t_10o_500000k_30r_1.json,success,0.298978,
-workload_500t_10o_500000k_30r_2.json,success,0.070297,
-workload_500t_10o_500000k_30r_3.json,success,0.079353,
-workload_500t_10o_500000k_30r_4.json,success,0.067048,
-workload_500t_10o_500000k_30r_5.json,success,0.104802,

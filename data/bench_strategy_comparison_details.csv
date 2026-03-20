@@ -1,0 +1,10 @@
+strategy,file,benchmark,committed,aborted,throughput_tx_per_sec,avg_latency_ms
+SER,Courseware_10s_200t_50k_1.json,Courseware,1926,74,458.6806,20.6480
+SER,SmallBank_10s_200t_50k_1.json,SmallBank,1861,139,448.8664,20.7120
+SER,TPCC_10s_200t_50k_1.json,TPCC,1855,145,455.3265,20.6420
+SI-SER,Courseware_10s_200t_50k_1.json,Courseware,1964,36,531.8170,17.7663
+SI-SER,SmallBank_10s_200t_50k_1.json,SmallBank,1889,111,519.6699,17.6850
+SI-SER,TPCC_10s_200t_50k_1.json,TPCC,1860,140,473.8854,19.3715
+PC-SI-SER,Courseware_10s_200t_50k_1.json,Courseware,1977,23,899.0450,9.7850
+PC-SI-SER,SmallBank_10s_200t_50k_1.json,SmallBank,1946,54,957.2061,9.2148
+PC-SI-SER,TPCC_10s_200t_50k_1.json,TPCC,2000,0,1401.5417,6.8760

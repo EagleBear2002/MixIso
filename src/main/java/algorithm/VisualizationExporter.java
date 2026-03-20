@@ -5,6 +5,7 @@ import java.awt.Color;
 import java.awt.Font;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
+import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.io.BufferedReader;
 import java.io.FileReader;
@@ -15,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -216,6 +218,194 @@ public class VisualizationExporter {
 		g.dispose();
 	}
 
+	public static void generateStrategyComparisonPng(Path summaryCsv, Path outputPng) throws Exception {
+		if (!Files.exists(summaryCsv)) {
+			return;
+		}
+
+		Map<String, Map<String, double[]>> metricByBenchmark = new HashMap<>();
+		try (BufferedReader reader = new BufferedReader(new FileReader(summaryCsv.toFile()))) {
+			String line = reader.readLine();
+			while ((line = reader.readLine()) != null) {
+				String[] cols = line.split(",");
+				if (cols.length < 5) {
+					continue;
+				}
+				String benchmark = cols[0].trim();
+				String strategy = cols[1].trim();
+				double throughput = Double.parseDouble(cols[2]);
+				double avgLatency = Double.parseDouble(cols[3]);
+				metricByBenchmark
+						.computeIfAbsent(benchmark, k -> new HashMap<>())
+						.put(strategy, new double[]{throughput, avgLatency});
+			}
+		}
+
+		if (metricByBenchmark.isEmpty()) {
+			return;
+		}
+
+		List<String> benchmarkOrder = new ArrayList<>();
+		benchmarkOrder.add("Courseware");
+		benchmarkOrder.add("SmallBank");
+		benchmarkOrder.add("TPCC");
+		for (String benchmark : metricByBenchmark.keySet()) {
+			if (!benchmarkOrder.contains(benchmark)) {
+				benchmarkOrder.add(benchmark);
+			}
+		}
+
+		List<String> strategyOrder = new ArrayList<>();
+		strategyOrder.add("SER");
+		strategyOrder.add("SI-SER");
+		strategyOrder.add("PC-SI-SER");
+
+		int width = 980;
+		int height = 360;
+		BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = image.createGraphics();
+		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+		g.setColor(new Color(245, 245, 245));
+		g.fillRect(0, 0, width, height);
+
+		Color[] colors = new Color[]{new Color(78, 88, 255), new Color(255, 170, 66), new Color(80, 225, 90)};
+		int legendX = 330;
+		int legendY = 28;
+		for (int i = 0; i < strategyOrder.size(); i++) {
+			g.setColor(colors[i]);
+			g.fillRect(legendX + i * 110, legendY - 10, 12, 12);
+			g.setColor(Color.DARK_GRAY);
+			g.drawRect(legendX + i * 110, legendY - 10, 12, 12);
+			g.setColor(Color.BLACK);
+			g.setFont(new Font("Serif", Font.PLAIN, 14));
+			g.drawString(strategyOrder.get(i), legendX + 28 + i * 110, legendY + 2);
+		}
+
+		drawBenchmarkGroupedPanel(g, 100, 55, 330, 200, "Throughput (txns/sec)", benchmarkOrder, strategyOrder, metricByBenchmark, 0, colors);
+		drawBenchmarkGroupedPanel(g, 530, 55, 330, 200, "Latency (ms)", benchmarkOrder, strategyOrder, metricByBenchmark, 1, colors);
+
+		if (outputPng.getParent() != null) {
+			Files.createDirectories(outputPng.getParent());
+		}
+		ImageIO.write(image, "png", outputPng.toFile());
+		g.dispose();
+	}
+
+	private static void drawBenchmarkGroupedPanel(Graphics2D g,
+										int x,
+										int y,
+										int w,
+										int h,
+										String yAxisTitle,
+										List<String> benchmarkOrder,
+										List<String> strategyOrder,
+										Map<String, Map<String, double[]>> metricByBenchmark,
+										int metricIndex,
+										Color[] colors) {
+		g.setColor(Color.BLACK);
+		drawVerticalText(g, yAxisTitle, x - 30, y + h - 10, new Font("Serif", Font.PLAIN, 14));
+
+		g.setColor(Color.WHITE);
+		g.fillRect(x, y, w, h);
+		g.setColor(Color.BLACK);
+		g.drawRect(x, y, w, h);
+
+		double maxValue = 0.0;
+		for (String benchmark : benchmarkOrder) {
+			Map<String, double[]> byStrategy = metricByBenchmark.get(benchmark);
+			if (byStrategy == null) {
+				continue;
+			}
+			for (String strategy : strategyOrder) {
+				double[] vals = byStrategy.get(strategy);
+				if (vals != null) {
+					maxValue = Math.max(maxValue, vals[metricIndex]);
+				}
+			}
+		}
+		if (maxValue <= 0.0) {
+			maxValue = 1.0;
+		}
+		double upperBound = niceUpperBound(maxValue);
+
+		int benchmarkCount = benchmarkOrder.size();
+		int groupW = Math.max(70, (w - 36) / Math.max(1, benchmarkCount));
+		int barW = Math.max(12, (groupW - 16) / 3);
+		int startX = x + 14;
+		int baseY = y + h - 18;
+
+		g.setColor(new Color(220, 220, 220));
+		for (int i = 0; i <= 4; i++) {
+			int py = y + 10 + (h - 28) - i * (h - 28) / 4;
+			g.drawLine(x + 1, py, x + w - 1, py);
+			g.setColor(Color.DARK_GRAY);
+			g.setFont(new Font("Serif", Font.PLAIN, 11));
+			double tick = (upperBound / 4.0) * i;
+			g.drawString(String.format("%.0f", tick), x - 26, py + 4);
+			g.setColor(new Color(220, 220, 220));
+		}
+
+		for (int bi = 0; bi < benchmarkCount; bi++) {
+			String benchmark = benchmarkOrder.get(bi);
+			Map<String, double[]> byStrategy = metricByBenchmark.getOrDefault(benchmark, Collections.emptyMap());
+			int groupStart = startX + bi * groupW;
+
+			for (int si = 0; si < strategyOrder.size(); si++) {
+				String strategy = strategyOrder.get(si);
+				double[] vals = byStrategy.get(strategy);
+				double value = vals == null ? 0.0 : vals[metricIndex];
+				int bh = (int) Math.round((value / upperBound) * (h - 28));
+				int bx = groupStart + si * barW + 5;
+				int by = baseY - bh;
+
+				g.setColor(colors[si % colors.length]);
+				g.fillRect(bx, by, barW - 2, bh);
+				g.setColor(Color.DARK_GRAY);
+				g.drawRect(bx, by, barW - 2, bh);
+			}
+
+			g.setColor(Color.BLACK);
+			g.setFont(new Font("Serif", Font.PLAIN, 14));
+			g.drawString(displayBenchmarkName(benchmark), groupStart - 1, baseY + 20);
+		}
+	}
+
+	private static double niceUpperBound(double value) {
+		if (value <= 0) {
+			return 1.0;
+		}
+		double[] bases = new double[]{1, 2, 5, 10};
+		double scale = Math.pow(10, Math.floor(Math.log10(value)));
+		for (double base : bases) {
+			double candidate = base * scale;
+			if (candidate >= value) {
+				return candidate;
+			}
+		}
+		return 10 * scale;
+	}
+
+	private static void drawVerticalText(Graphics2D g, String text, int x, int y, Font font) {
+		AffineTransform originalTransform = g.getTransform();
+		Font originalFont = g.getFont();
+		g.setFont(font);
+		g.rotate(-Math.PI / 2, x, y);
+		g.setColor(Color.BLACK);
+		g.drawString(text, x, y);
+		g.setTransform(originalTransform);
+		g.setFont(originalFont);
+	}
+
+	private static String displayBenchmarkName(String benchmark) {
+		if ("SmallBank".equalsIgnoreCase(benchmark)) {
+			return "Smallbank";
+		}
+		if ("TPCC".equalsIgnoreCase(benchmark)) {
+			return "TPC-C";
+		}
+		return benchmark;
+	}
+
 	private static void drawPanel(Graphics2D g, int x, int y, int w, int h, String title, Map<Integer, Stats> map) {
 		g.setColor(Color.BLACK);
 		g.setFont(new Font("SansSerif", Font.BOLD, 14));
@@ -271,6 +461,113 @@ public class VisualizationExporter {
 
 		g.setFont(new Font("SansSerif", Font.PLAIN, 10));
 		g.drawString("sec", x + 4, y + 12);
+	}
+
+	public static void generateExecutionSummaryPng(Path summaryCsv, Path outputPng) throws Exception {
+		if (!Files.exists(summaryCsv)) {
+			return;
+		}
+
+		// Read summary CSV: benchmark,mean_throughput_tx_per_sec,mean_avg_latency_ms,samples
+		Map<String, double[]> metricByBenchmark = new LinkedHashMap<>();
+		try (BufferedReader reader = new BufferedReader(new FileReader(summaryCsv.toFile()))) {
+			String line = reader.readLine(); // skip header
+			while ((line = reader.readLine()) != null) {
+				String[] parts = line.split(",");
+				if (parts.length >= 3) {
+					String benchmark = parts[0].trim();
+					double throughput = Double.parseDouble(parts[1].trim());
+					double latency = Double.parseDouble(parts[2].trim());
+					metricByBenchmark.put(benchmark, new double[]{throughput, latency});
+				}
+			}
+		}
+
+		if (metricByBenchmark.isEmpty()) {
+			return;
+		}
+
+		int width = 980;
+		int height = 360;
+		BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = image.createGraphics();
+		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+		g.setColor(new Color(245, 245, 245));
+		g.fillRect(0, 0, width, height);
+
+		// Draw throughput panel
+		drawExecutionMetricPanel(g, 100, 55, 330, 200, "Throughput (txns/sec)", metricByBenchmark, 0);
+		// Draw latency panel
+		drawExecutionMetricPanel(g, 530, 55, 330, 200, "Latency (ms)", metricByBenchmark, 1);
+
+		if (outputPng.getParent() != null) {
+			Files.createDirectories(outputPng.getParent());
+		}
+		ImageIO.write(image, "png", outputPng.toFile());
+		g.dispose();
+	}
+
+	private static void drawExecutionMetricPanel(Graphics2D g, int x, int y, int w, int h, String yAxisTitle,
+			Map<String, double[]> metricByBenchmark, int metricIndex) {
+		g.setColor(Color.BLACK);
+		drawVerticalText(g, yAxisTitle, x - 30, y + h - 10, new Font("Serif", Font.PLAIN, 14));
+
+		g.setColor(Color.WHITE);
+		g.fillRect(x, y, w, h);
+		g.setColor(Color.BLACK);
+		g.drawRect(x, y, w, h);
+
+		// Find max value
+		double maxValue = 0.0;
+		for (double[] vals : metricByBenchmark.values()) {
+			if (vals != null) {
+				maxValue = Math.max(maxValue, vals[metricIndex]);
+			}
+		}
+		if (maxValue <= 0.0) {
+			maxValue = 1.0;
+		}
+		double upperBound = niceUpperBound(maxValue);
+
+		// Draw grid lines and Y-axis labels
+		g.setColor(new Color(220, 220, 220));
+		for (int i = 0; i <= 4; i++) {
+			int py = y + 10 + (h - 28) - i * (h - 28) / 4;
+			g.drawLine(x + 1, py, x + w - 1, py);
+			g.setColor(Color.DARK_GRAY);
+			g.setFont(new Font("Serif", Font.PLAIN, 11));
+			double tick = (upperBound / 4.0) * i;
+			g.drawString(String.format("%.0f", tick), x - 26, py + 4);
+			g.setColor(new Color(220, 220, 220));
+		}
+
+		// Draw bars
+		Color barColor = new Color(78, 88, 255);
+		List<String> benchmarks = new ArrayList<>(metricByBenchmark.keySet());
+		int barCount = benchmarks.size();
+		int barW = Math.max(40, (w - 36) / Math.max(1, barCount));
+		int startX = x + 14;
+		int baseY = y + h - 18;
+
+		for (int bi = 0; bi < barCount; bi++) {
+			String benchmark = benchmarks.get(bi);
+			double[] vals = metricByBenchmark.get(benchmark);
+			double value = vals == null ? 0.0 : vals[metricIndex];
+			int bh = (int) Math.round((value / upperBound) * (h - 28));
+			int bx = startX + bi * barW + 5;
+			int by = baseY - bh;
+
+			g.setColor(barColor);
+			g.fillRect(bx, by, barW - 10, bh);
+			g.setColor(Color.DARK_GRAY);
+			g.drawRect(bx, by, barW - 10, bh);
+
+			// Draw benchmark name
+			g.setColor(Color.BLACK);
+			g.setFont(new Font("Serif", Font.PLAIN, 14));
+			String displayName = displayBenchmarkName(benchmark);
+			g.drawString(displayName, bx + 5, baseY + 20);
+		}
 	}
 
 	private static class Record {

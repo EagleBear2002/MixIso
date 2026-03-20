@@ -29,6 +29,7 @@ import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -41,10 +42,30 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class Executor {
+	public enum ExecutionStrategy {
+		CURRENT,
+		NON_SER_AS_SI,
+		ALL_SER;
+
+		public static ExecutionStrategy fromString(String raw) {
+			if (raw == null || raw.trim().isEmpty()) {
+				return CURRENT;
+			}
+			String normalized = raw.trim().toUpperCase();
+			for (ExecutionStrategy strategy : values()) {
+				if (strategy.name().equals(normalized)) {
+					return strategy;
+				}
+			}
+			throw new IllegalArgumentException("Unknown strategy: " + raw + ". Supported: CURRENT, NON_SER_AS_SI, ALL_SER");
+		}
+	}
+
 	private static final int DEFAULT_DC_COUNT = 5;
 	private static final int DEFAULT_MIN_RTT_MS = 1;
 	private static final int DEFAULT_MAX_RTT_MS = 3;
 	private static final long TX_TIMEOUT_SECONDS = 120;
+	private static final int ARBITER_NODE_ID = -1;
 
 	private final List<DataCenterNode> dataCenters;
 	private final int minRttMs;
@@ -52,36 +73,41 @@ public class Executor {
 	private final AtomicLong logicalClock;
 	private final AtomicLong txnIdGenerator;
 	private final CopyOnWriteArrayList<CommitRecord> commitLog;
-	private final Object godLock;
 	private final Set<Long> committedTransactions;
 	private final Map<Long, Set<Long>> visibleToTxn;
 	private final Map<Long, Long> commitTimestampByTxn;
 	private final Map<Integer, Set<Long>> replicaVisibleTransactions;
 	private final Random rttRandom;
+	private final ExecutionStrategy strategy;
+	private final Object godLock;
+	
+	// ThreadLocal 为每个线程分配数据中心
+	private final ThreadLocal<Integer> threadDataCenterMap = new ThreadLocal<>();
 
-	private Executor(int dcCount, int minRttMs, int maxRttMs) {
+	private Executor(int dcCount, int minRttMs, int maxRttMs, ExecutionStrategy strategy) {
 		this.minRttMs = minRttMs;
 		this.maxRttMs = maxRttMs;
+		this.strategy = strategy;
 		this.logicalClock = new AtomicLong(0L);
 		this.txnIdGenerator = new AtomicLong(0L);
 		this.commitLog = new CopyOnWriteArrayList<>();
 		this.godLock = new Object();
-		this.committedTransactions = new HashSet<>();
-		this.visibleToTxn = new HashMap<>();
-		this.commitTimestampByTxn = new HashMap<>();
-		this.replicaVisibleTransactions = new HashMap<>();
+		this.committedTransactions = ConcurrentHashMap.newKeySet();
+		this.visibleToTxn = new ConcurrentHashMap<>();
+		this.commitTimestampByTxn = new ConcurrentHashMap<>();
+		this.replicaVisibleTransactions = new ConcurrentHashMap<>();
 		this.rttRandom = new Random(42L);
 		this.dataCenters = new ArrayList<>();
 		for (int i = 0; i < dcCount; i++) {
 			dataCenters.add(new DataCenterNode(i));
-			replicaVisibleTransactions.put(i, new HashSet<>());
+			replicaVisibleTransactions.put(i, ConcurrentHashMap.newKeySet());
 		}
 	}
 
 	public static void main(String[] args) {
 		if (args.length < 2) {
-			System.err.println("Usage: Executor <allocated_workload_file> <output_csv> [dcCount] [minRttMs] [maxRttMs]");
-			System.err.println("Example: Executor data/allocated_bench_workload/Courseware_10s_20t_500k_1.json data/bench_execution_results.csv 5 100 300");
+			System.err.println("Usage: Executor <allocated_workload_file> <output_csv> [dcCount] [minRttMs] [maxRttMs] [strategy]");
+			System.err.println("Example: Executor data/allocated_bench_workload/Courseware_10s_20t_500k_1.json data/bench_execution_results.csv 5 100 300 CURRENT");
 			System.exit(1);
 		}
 
@@ -90,17 +116,19 @@ public class Executor {
 		int dcCount = args.length >= 3 ? Integer.parseInt(args[2]) : DEFAULT_DC_COUNT;
 		int minRtt = args.length >= 4 ? Integer.parseInt(args[3]) : DEFAULT_MIN_RTT_MS;
 		int maxRtt = args.length >= 5 ? Integer.parseInt(args[4]) : DEFAULT_MAX_RTT_MS;
+		ExecutionStrategy strategy = args.length >= 6 ? ExecutionStrategy.fromString(args[5]) : ExecutionStrategy.CURRENT;
 
 		if (dcCount <= 0 || minRtt < 0 || maxRtt < minRtt) {
 			System.err.println("Invalid parameters: dcCount > 0, minRtt >= 0, maxRtt >= minRtt are required");
 			System.exit(1);
 		}
 
-		Executor engine = new Executor(dcCount, minRtt, maxRtt);
+		Executor engine = new Executor(dcCount, minRtt, maxRtt, strategy);
 		try {
 			ExecutionResult result = engine.executeWorkloadFile(workloadFile);
 			appendCsv(outputCsv, result);
-			System.out.printf("Execution completed: %s | committed=%d aborted=%d throughput=%.2f tx/s avgLatency=%.2f ms%n",
+			System.out.printf("Execution completed [%s]: %s | committed=%d aborted=%d throughput=%.2f tx/s avgLatency=%.2f ms%n",
+					strategy,
 					result.getFileName(), result.getCommittedTxns(), result.getAbortedTxns(), result.getThroughputTxPerSec(), result.getAvgLatencyMs());
 		} catch (Exception e) {
 			System.err.println("Execution failed: " + e.getMessage());
@@ -116,14 +144,25 @@ public class Executor {
 													 int dcCount,
 													 int minRtt,
 													 int maxRtt) throws Exception {
+		return runSingleWorkload(workloadFile, outputCsv, dcCount, minRtt, maxRtt, ExecutionStrategy.CURRENT);
+	}
+
+	public static ExecutionResult runSingleWorkload(String workloadFile,
+												 String outputCsv,
+												 int dcCount,
+												 int minRtt,
+												 int maxRtt,
+												 ExecutionStrategy strategy) throws Exception {
 		if (dcCount <= 0 || minRtt < 0 || maxRtt < minRtt) {
 			throw new IllegalArgumentException("Invalid parameters: dcCount > 0, minRtt >= 0, maxRtt >= minRtt are required");
 		}
 
-		Executor engine = new Executor(dcCount, minRtt, maxRtt);
+		Executor engine = new Executor(dcCount, minRtt, maxRtt, strategy);
 		try {
 			ExecutionResult result = engine.executeWorkloadFile(workloadFile);
-			appendCsv(outputCsv, result);
+			if (outputCsv != null && !outputCsv.trim().isEmpty()) {
+				appendCsv(outputCsv, result);
+			}
 			return result;
 		} finally {
 			engine.shutdown();
@@ -242,12 +281,16 @@ public class Executor {
 	}
 
 	private void executeSession(WorkloadSession session,
-								int dataCenterId,
+								int assignedDataCenterId,
 								List<Long> latencies,
 								AtomicLong committed,
 								AtomicLong aborted) {
+		// 为当前线程分配数据中心
+		threadDataCenterMap.set(assignedDataCenterId);
+
 		List<ProgramInstance> transactions = session.getInstances();
 		if (transactions == null || transactions.isEmpty()) {
+			threadDataCenterMap.remove();
 			return;
 		}
 
@@ -256,99 +299,190 @@ public class Executor {
 				aborted.incrementAndGet();
 				continue;
 			}
+			
 			long startMs = System.currentTimeMillis();
-			TxContext context = beginTransaction(transaction.getIsolationLevel(), dataCenterId);
-
-			Set<String> readSet = new HashSet<>();
-			Set<String> writeSet = new HashSet<>();
-
-			for (StaticOperation operation : transaction.getOperations()) {
-				String key = operation.getKey();
-				if (operation.isWriteOp()) {
-					writeSet.add(key);
-					context.getBuffer().put(key, syntheticValue(key, context.getSts()));
-				} else if (operation.isReadOp()) {
-					readSet.add(key);
-					if (!context.getBuffer().containsKey(key)) {
-						int readValue = readWithIsolation(dataCenterId, context, key);
-						context.setLastReadValue(readValue);
-					}
+			try {
+				boolean success = executeTransaction(transaction);
+				if (success) {
+					committed.incrementAndGet();
+					latencies.add(System.currentTimeMillis() - startMs);
+				} else {
+					aborted.incrementAndGet();
 				}
-			}
-
-			if (tryCommit(dataCenterId, context, readSet, writeSet)) {
-				committed.incrementAndGet();
-				latencies.add(System.currentTimeMillis() - startMs);
-			} else {
+			} catch (Exception e) {
 				aborted.incrementAndGet();
 			}
 		}
+
+		// 清理 ThreadLocal
+		threadDataCenterMap.remove();
 	}
 
-	private TxContext beginTransaction(IsolationLevel level, int originDcId) {
+	private IsolationLevel resolveIsolationLevel(IsolationLevel declaredLevel) {
+		IsolationLevel base = declaredLevel == null ? IsolationLevel.SNAPSHOT_ISOLATION : declaredLevel;
+		switch (strategy) {
+			case ALL_SER:
+				return IsolationLevel.SERIALIZABLE;
+			case NON_SER_AS_SI:
+				return base == IsolationLevel.SERIALIZABLE ? IsolationLevel.SERIALIZABLE : IsolationLevel.SNAPSHOT_ISOLATION;
+			case CURRENT:
+			default:
+				return base;
+		}
+	}
+
+	private boolean executeTransaction(ProgramInstance txn) throws InterruptedException {
+		// 获取当前线程分配的数据中心
+		Integer dcId = threadDataCenterMap.get();
+		if (dcId == null) {
+			return false;
+		}
+
+		DataCenterNode dataCenter = dataCenters.get(dcId);
+		IsolationLevel effectiveLevel = resolveIsolationLevel(txn.getIsolationLevel());
+		long txId = txnIdGenerator.incrementAndGet();
+		long sts;
 		synchronized (godLock) {
-			long txId = txnIdGenerator.incrementAndGet();
-			long sts = logicalClock.incrementAndGet();
-			Set<Long> visibleSnapshot = new HashSet<>(committedTransactions);
-			visibleToTxn.put(txId, new HashSet<>(visibleSnapshot));
-			return new TxContext(level, txId, sts, originDcId, visibleSnapshot);
-		}
-	}
-
-	private int readWithIsolation(int dataCenterId, TxContext context, String key) {
-		DataCenterNode localDc = dataCenters.get(dataCenterId);
-		if (context.getBuffer().containsKey(key)) {
-			return context.getBuffer().get(key);
+			sts = logicalClock.incrementAndGet();
 		}
 
-		return localDc.readVisibleValue(key, context.getSts());
-	}
+		// 事务缓冲区
+		Map<String, Integer> buffer = new HashMap<>();
+		Set<String> readSet = new HashSet<>();
+		Set<String> writeSet = new HashSet<>();
 
-	private boolean tryCommit(int dataCenterId, TxContext context, Set<String> readSet, Set<String> writeSet) {
-		long cts;
-		synchronized (godLock) {
-			cts = logicalClock.incrementAndGet();
-
-			if (!checkTransVis(context)) {
-				return false;
+		// 执行操作
+		for (StaticOperation op : txn.getOperations()) {
+			String key = op.getKey();
+			if (op.isWriteOp()) {
+				writeSet.add(key);
+				buffer.put(key, syntheticValue(key, logicalClock.get()));
+			} else {
+				readSet.add(key);
+				// 内部读：先检查 buffer
+				Integer bufferedValue = readInt(buffer, key);
+				if (bufferedValue == null) {
+					// 外部读：读取时间戳 < sts 的最新版本
+					readExt(dataCenter, key, sts);
+				}
 			}
-			if (!checkPrefix(context)) {
-				return false;
-			}
-			if (!checkNoConflict(context, cts, readSet, writeSet)) {
-				return false;
-			}
-			if (!checkTotalVis(context)) {
-				return false;
-			}
-
-			commitLog.add(new CommitRecord(context.getTxId(), context.getSts(), cts, readSet, writeSet, context.getOriginDcId()));
-			committedTransactions.add(context.getTxId());
-			commitTimestampByTxn.put(context.getTxId(), cts);
-			visibleToTxn.computeIfAbsent(context.getTxId(), k -> new HashSet<>()).add(context.getTxId());
-			replicaVisibleTransactions.computeIfAbsent(context.getOriginDcId(), k -> new HashSet<>()).add(context.getTxId());
 		}
 
-		dataCenters.get(dataCenterId).applyWrites(context.getBuffer(), cts);
-		replicateCommit(dataCenterId, context.getTxId(), context.getBuffer(), cts);
+		long commitTs;
+		if (needsArbiterRoundTrip(effectiveLevel, readSet, writeSet)) {
+			// 通过仲裁节点进行冲突检测和提交判定（含通信开销）
+			commitTs = requestArbiterCommitDecision(txId, dcId, effectiveLevel, sts, readSet, writeSet);
+		} else {
+			// 冲突检测集合为空，直接本地提交
+			commitTs = localCommitWithoutArbiter(txId, dcId, sts, readSet, writeSet);
+		}
+		if (commitTs < 0L) {
+			return false;
+		}
+
+		// 模拟网络延迟并应用写入
+		sleepMillis(randomRttMs());
+		dataCenter.applyWrites(new HashMap<>(buffer), commitTs);
+
+		// 传播更新到其他副本
+		propagateToOtherReplicas(dcId, txId, buffer, commitTs);
+
 		return true;
 	}
 
-	private boolean checkTransVis(TxContext context) {
-		Set<Long> visibleSet = visibleToTxn.getOrDefault(context.getTxId(), Collections.emptySet());
-		return committedTransactions.containsAll(visibleSet);
+	private boolean needsArbiterRoundTrip(IsolationLevel level,
+									   Set<String> readSet,
+									   Set<String> writeSet) {
+		if (level == IsolationLevel.SNAPSHOT_ISOLATION) {
+			return !writeSet.isEmpty();
+		}
+		if (level == IsolationLevel.SERIALIZABLE) {
+			return !(readSet.isEmpty() && writeSet.isEmpty());
+		}
+		return false;
 	}
 
-	private boolean checkPrefix(TxContext context) {
-		Set<Long> visibleSet = visibleToTxn.getOrDefault(context.getTxId(), Collections.emptySet());
-		for (Long visibleTxnId : visibleSet) {
-			Long visibleTs = commitTimestampByTxn.get(visibleTxnId);
-			if (visibleTs == null) {
-				continue;
+	private long localCommitWithoutArbiter(long txId,
+									 int originDcId,
+									 long sts,
+									 Set<String> readSet,
+									 Set<String> writeSet) {
+		synchronized (godLock) {
+			long cts = logicalClock.incrementAndGet();
+			commitLog.add(new CommitRecord(txId, sts, cts, readSet, writeSet, originDcId));
+			committedTransactions.add(txId);
+			commitTimestampByTxn.put(txId, cts);
+			replicaVisibleTransactions.computeIfAbsent(originDcId, k -> ConcurrentHashMap.newKeySet()).add(txId);
+			return cts;
+		}
+	}
+
+	private long requestArbiterCommitDecision(long txId,
+										 int originDcId,
+										 IsolationLevel level,
+										 long sts,
+										 Set<String> readSet,
+										 Set<String> writeSet) throws InterruptedException {
+		// requester -> arbiter
+		sleepMillis(randomRttMs());
+
+		long decision = arbitrateCommit(txId, originDcId, level, sts, readSet, writeSet);
+
+		// arbiter -> requester
+		sleepMillis(randomRttMs());
+		return decision;
+	}
+
+	private long arbitrateCommit(long txId,
+							int originDcId,
+							IsolationLevel level,
+							long sts,
+							Set<String> readSet,
+							Set<String> writeSet) {
+		synchronized (godLock) {
+			long cts = logicalClock.incrementAndGet();
+
+			if (!checkConflictByLevel(level, sts, cts, readSet, writeSet)) {
+				return -1L;
 			}
-			for (Long committedTxnId : committedTransactions) {
-				Long committedTs = commitTimestampByTxn.get(committedTxnId);
-				if (committedTs != null && committedTs < visibleTs && !visibleSet.contains(committedTxnId)) {
+
+			commitLog.add(new CommitRecord(txId, sts, cts, readSet, writeSet, originDcId));
+			committedTransactions.add(txId);
+			commitTimestampByTxn.put(txId, cts);
+			replicaVisibleTransactions.computeIfAbsent(originDcId, k -> ConcurrentHashMap.newKeySet()).add(txId);
+			replicaVisibleTransactions.computeIfAbsent(ARBITER_NODE_ID, k -> ConcurrentHashMap.newKeySet()).add(txId);
+			return cts;
+		}
+	}
+
+	// 从缓冲区读取指定的键
+	private Integer readInt(Map<String, Integer> buffer, String key) {
+		return buffer.get(key);
+	}
+
+	// 从存储读取 timestamp < sts 的最新版本
+	private int readExt(DataCenterNode dataCenter, String key, long sts) {
+		long visibleTs = Math.max(0L, sts - 1L);
+		return dataCenter.readVisibleValue(key, visibleTs);
+	}
+
+	private boolean checkTransVis(long txId, Set<Long> visibleToT) {
+		for (Long visibleTxn : visibleToT) {
+			if (!committedTransactions.contains(visibleTxn)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private boolean checkPrefix(long txId, Set<Long> visibleToT) {
+		List<CommitRecord> records = new ArrayList<>(commitLog);
+		for (int i = 0; i < records.size(); i++) {
+			CommitRecord rec1 = records.get(i);
+			for (int j = i + 1; j < records.size(); j++) {
+				CommitRecord rec2 = records.get(j);
+				if (rec1.getCts() < rec2.getCts() && visibleToT.contains(rec2.getTxId()) && 
+				    !visibleToT.contains(rec1.getTxId())) {
 					return false;
 				}
 			}
@@ -356,81 +490,88 @@ public class Executor {
 		return true;
 	}
 
-	private boolean checkNoConflict(TxContext context, long cts, Set<String> readSet, Set<String> writeSet) {
-		IsolationLevel level = context.getLevel();
-		if (level == IsolationLevel.SNAPSHOT_ISOLATION || level == IsolationLevel.PARALLEL_SNAPSHOT_ISOLATION) {
-			return !hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, false);
-		}
-		if (level == IsolationLevel.SERIALIZABLE) {
-			return !hasWindowConflict(context.getSts(), cts, readSet, writeSet, true, true);
+	private boolean checkNoConflict(Set<Long> visibleToT, long cts, Set<String> readSet, Set<String> writeSet) {
+		for (CommitRecord record : commitLog) {
+			if (!visibleToT.contains(record.getTxId())) {
+				// 检查写-写冲突
+				boolean wwConflict = record.getWriteSet().stream()
+						.anyMatch(writeSet::contains);
+				if (wwConflict) {
+					return false;
+				}
+			}
 		}
 		return true;
 	}
 
-	private boolean checkTotalVis(TxContext context) {
-		if (context.getLevel() != IsolationLevel.SERIALIZABLE) {
+	private boolean checkConflictByLevel(IsolationLevel level,
+											 long sts,
+											 long cts,
+											 Set<String> readSet,
+											 Set<String> writeSet) {
+		if (level != IsolationLevel.SNAPSHOT_ISOLATION && level != IsolationLevel.SERIALIZABLE) {
 			return true;
 		}
 
-		Set<Long> visibleSet = visibleToTxn.getOrDefault(context.getTxId(), Collections.emptySet());
 		for (CommitRecord record : commitLog) {
-			if (record.getCts() <= context.getSts() && !visibleSet.contains(record.getTxId())) {
+			long otherCts = record.getCts();
+			if (otherCts <= sts || otherCts >= cts) {
+				continue;
+			}
+
+			boolean wwConflict = hasIntersection(writeSet, record.getWriteSet());
+			if (level == IsolationLevel.SNAPSHOT_ISOLATION) {
+				if (wwConflict) {
+					return false;
+				}
+				continue;
+			}
+
+			boolean rwConflict = hasIntersection(readSet, record.getWriteSet());
+			boolean wrConflict = hasIntersection(writeSet, record.getReadSet());
+			if (wwConflict || rwConflict || wrConflict) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	private boolean hasIntersection(Set<String> a, Set<String> b) {
+		for (String key : a) {
+			if (b.contains(key)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean checkTotalVis(Set<Long> visibleToT, long cts) {
+		for (CommitRecord record : commitLog) {
+			if (record.getCts() < cts && !visibleToT.contains(record.getTxId())) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	private boolean hasWindowConflict(long sts,
-							 long cts,
-							 Set<String> readSet,
-							 Set<String> writeSet,
-							 boolean checkWw,
-							 boolean checkWr) {
-		for (CommitRecord record : commitLog) {
-			if (record.getCts() > sts && record.getCts() < cts) {
-				boolean ww = !Collections.disjoint(record.getWriteSet(), writeSet);
-				boolean wr = !Collections.disjoint(writeSet, record.getReadSet());
-
-				if ((checkWw && ww) || (checkWr && wr)) {
-					return true;
-				}
-			}
+	private void propagateToOtherReplicas(int originDcId, long txId, Map<String, Integer> writes, long commitTs) {
+		if (writes == null || writes.isEmpty()) {
+			return;
 		}
-		return false;
-	}
 
-	private void replicateCommit(int originDcId, long txId, Map<String, Integer> writes, long commitTs) {
-		List<Future<Void>> futures = new ArrayList<>();
+		// 异步传播到其他副本
 		for (DataCenterNode targetDc : dataCenters) {
 			if (targetDc.getId() == originDcId) {
 				continue;
 			}
-			int rtt = randomRttMs();
-			Future<Void> future = targetDc.getExecutor().submit(() -> {
-				sleepMillis(rtt);
-				targetDc.applyWrites(writes, commitTs);
-				markReplicaVisible(targetDc.getId(), txId);
-				return null;
+			targetDc.getExecutor().submit(() -> {
+				sleepMillis(randomRttMs());
+				targetDc.applyWrites(new HashMap<>(writes), commitTs);
+				synchronized (godLock) {
+					replicaVisibleTransactions.computeIfAbsent(targetDc.getId(), k -> ConcurrentHashMap.newKeySet()).add(txId);
+				}
 			});
-			futures.add(future);
-		}
-
-		for (Future<Void> future : futures) {
-			try {
-				future.get(TX_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-			} catch (InterruptedException e) {
-				Thread.currentThread().interrupt();
-				throw new IllegalStateException("Interrupted during replication", e);
-			} catch (ExecutionException | TimeoutException e) {
-				throw new IllegalStateException("Replication failed", e);
-			}
-		}
-	}
-
-	private void markReplicaVisible(int replicaId, long txId) {
-		synchronized (godLock) {
-			replicaVisibleTransactions.computeIfAbsent(replicaId, k -> new HashSet<>()).add(txId);
 		}
 	}
 

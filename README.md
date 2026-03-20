@@ -1,214 +1,183 @@
-# Artifact for `On Mixing Database Isolation Levels`
+# MixIso 实验手册（当前版本）
 
-## Directory Organization
+本仓库是论文 *On Mixing Database Isolation Levels* 的实验代码实现，当前版本以 **Java CLI** 为主，支持：
+
+- 基准工作负载生成
+- 隔离级别分配
+- 分布式执行仿真（默认低延迟）
+- 三种执行策略性能对比（SER / SI-SER / PC-SI-SER）
+
+## 1. 环境要求
+
+- Java 17+
+- Maven 3.8+
+
+> Windows PowerShell 的 classpath 分隔符使用 `;`；Linux/macOS 使用 `:`。
+
+## 2. 构建与依赖
+
+在项目根目录执行：
+
+```sh
+mvn -DskipTests compile
+mvn dependency:copy-dependencies
+```
+
+说明：
+
+- `compile` 生成 `target/classes`
+- `copy-dependencies` 生成 `target/dependency/*`，用于运行 `java -cp` 命令
+
+## 3. 项目目录（实验相关）
 
 ```plain
-/MixIso
-|-- README.md
-|-- pom.xml                 # Maven project configuration
-|-- src/                    # Java source code for MixIso allocator
-|-- scripts/                # Python scripts for data generation and experiment orchestration
-|   |-- generate_bench_workload.py
-|   |-- allocate_bench_workload.py
-|   |-- generate_random_workload.py
-|   |-- random_workload_for_test.py
-|   `-- allocate_random_workload.py
-`-- data/                   # Workload files and experimental results
-    |-- bench_workload/     # Base benchmark workloads (TPC-C, SmallBank, and Courseware) for Q1
-    |-- random_workload/    # Base random workloads for Q2
-    |-- allocated_bench_workload/  # Results of Q1
-    `-- allocated_random_workload/ # Results of Q2
+MixIso
+├─ src/main/java/algorithm/
+│  ├─ Allocator.java
+│  ├─ BenchWorkloadGenerator.java
+│  ├─ BenchWorkloadAllocatorBatch.java
+│  ├─ BenchWorkloadExecutorBatch.java
+│  ├─ BenchStrategyComparisonBatch.java
+│  ├─ RandomWorkloadGenerator.java
+│  ├─ RandomWorkloadAllocatorBatch.java
+│  ├─ RandomWorkloadExperiment.java
+│  └─ VisualizationExporter.java
+└─ data/
+    ├─ bench_workload/
+    ├─ allocated_bench_workload/
+    ├─ benchmarks/
+    └─ *.csv / *.png
 ```
 
-## Reuse MixIso
+## 4. 核心命令
 
-### Prerequisite
-
-- **Java 17** or above is recommended.
-- **Maven** for building the Java project.
-
-### Build with Maven
+### 4.1 单文件分配 / 评估
 
 ```sh
-mvn clean package
-```
-
-> On Windows PowerShell, keep the classpath separator `;`.
-> On Linux/macOS shells, replace it with `:`.
-
-### Core Usage
-
-The core allocation logic is implemented in Java. You can run it directly:
-
-```sh
-# mode 1: benchmark performance
+# 评估（benchmark 模式）
 java -cp "target/classes;target/dependency/*" algorithm.Allocator benchmark <workload_file> <output_csv> [warmups] [iterations]
 
-# mode 2: allocate isolation levels
+# 分配（allocate 模式）
 java -cp "target/classes;target/dependency/*" algorithm.Allocator allocate <input_workload> <output_workload>
 ```
 
-## Java CLI Workflows (Python-free)
-
-All major automation workflows previously in `scripts/*.py` now have Java CLI equivalents:
+### 4.2 批处理工作流（推荐）
 
 ```sh
-# 1) Generate benchmark workloads (replaces generate_bench_workload.py)
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 10 --txns-per-session 2 --max-key 50 --cases 3
+# 1) 生成基准工作负载
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 10 --txns-per-session 200 --max-key 50000 --cases 1
 
-# 2) Batch allocate benchmark workloads (replaces allocate_bench_workload.py)
+# 2) 批量分配隔离级别（并导出分布图）
 java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadAllocatorBatch
-# -> outputs: data/bench_allocation_distribution.csv and data/bench_allocation_distribution.png
 
-# 3) Batch execute allocated benchmark workloads (replaces execute_allocated_bench.py)
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
+# 3) 批量执行已分配工作负载（默认 5 个 DC，默认延迟 3-10ms）
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch
+```
 
-# 4) Generate random workloads (replaces generate_random_workload.py)
+`BenchWorkloadExecutorBatch` 参数：
+
+```plain
+java ... algorithm.BenchWorkloadExecutorBatch [dcCount] [minRttMs] [maxRttMs] [outputCsv]
+```
+
+当前默认值：
+
+- `dcCount=5`
+- `minRttMs=3`
+- `maxRttMs=10`
+- `outputCsv=data/bench_execution_results.csv`
+
+示例（显式指定）：
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 3 10 data/bench_execution_results.csv
+```
+
+## 5. 三种策略对比实验（Q3 重点）
+
+使用以下命令一次性完成三策略对比：
+
+```sh
+java -cp "target/classes;target/dependency/*" algorithm.BenchStrategyComparisonBatch
+```
+
+参数形式：
+
+```plain
+java ... algorithm.BenchStrategyComparisonBatch [dcCount] [minRttMs] [maxRttMs] [detailCsv] [summaryCsv] [outputPng]
+```
+
+当前默认值：
+
+- `dcCount=5`
+- `minRttMs=3`
+- `maxRttMs=10`
+- `detailCsv=data/bench_strategy_comparison_details.csv`
+- `summaryCsv=data/bench_strategy_comparison_summary.csv`
+- `outputPng=data/bench_strategy_comparison.png`
+
+策略映射（代码内固定）：
+
+- `SER`  ← `ExecutionStrategy.ALL_SER`
+- `SI-SER` ← `ExecutionStrategy.NON_SER_AS_SI`
+- `PC-SI-SER` ← `ExecutionStrategy.CURRENT`
+
+输出文件：
+
+- `data/bench_strategy_comparison_details.csv`：每个 workload × 每个策略的明细
+- `data/bench_strategy_comparison_summary.csv`：按 benchmark 聚合后的均值
+- `data/bench_strategy_comparison.png`：吞吐量/延迟对比图
+
+## 6. 随机工作负载实验（Q2）
+
+```sh
+# 1) 生成随机工作负载
 java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadGenerator --txns 500 --max-ops 10 --max-key 500000 --read-only 30 --cases 5
 
-# 5) Batch allocate random workloads with timing CSV (replaces allocate_random_workload.py)
+# 2) 批量分配并统计性能
 java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadAllocatorBatch
-# -> outputs: data/allocation_performance.csv, data/allocation_performance_analysis.csv, data/allocation_performance.png
+
+# 3) 控制变量实验
+java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadExperiment
 ```
 
-## Task Guide (Recommended)
+常见输出：
 
-This section shows how to complete common tasks end-to-end using Java only.
-
-### Task A: Benchmark workload allocation + execution (Q1)
-
-1. Generate benchmark workloads:
-
-```sh
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 3 --txns-per-session 100 --max-key 50 --cases 3
-```
-
-2. Allocate isolation levels in batch (also exports Figure-8 style distribution files):
-
-```sh
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadAllocatorBatch
-```
-
-3. Execute all allocated benchmark files with distributed simulation:
-
-```sh
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
-```
-
-Outputs:
-- `data/allocated_bench_workload/`
-- `data/bench_allocation_distribution.csv`
-- `data/bench_allocation_distribution.png`
-- `data/bench_execution_results.csv`
-
-### Task B: Random workload allocation + performance analysis (Q2)
-
-1. Generate random workloads:
-
-```sh
-java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadGenerator --txns 500 --max-ops 10 --max-key 500000 --read-only 30 --cases 5
-```
-
-2. Allocate all random workloads and export timing/analysis/plot:
-
-```sh
-java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadAllocatorBatch
-```
-
-Outputs:
-- `data/allocated_random_workload/`
 - `data/allocation_performance.csv`
 - `data/allocation_performance_analysis.csv`
 - `data/allocation_performance.png`
-
-### Task C: Full random experiment sweep (control-variable method)
-
-```sh
-java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadExperiment
-```
-
-Output:
 - `data/allocation_experiment_summary.csv`
 
-## Legacy Python Scripts (Optional)
-
-Python scripts in `scripts/` are kept for compatibility and quick prototyping.
-The Java CLI workflow above is the primary and recommended path.
-
-## Evaluation
-
-This section describes how to reproduce the evaluation from the paper "On Mixing Database Isolation Levels".
-
-### Research Questions
-
-The evaluation addresses three key research questions:
-
-1. **Q1: Effectiveness** — Can our allocator safely allocate weaker isolation levels than existing approaches while preserving serializability?
-
-2. **Q2: Efficiency** — How efficient is our allocator in computing isolation level allocations on large workloads?
-
-3. **Q3: System Performance** — To what extent do the weaker isolation levels assigned by our allocator translate into performance gains in database systems?
-
-### Benchmarks
-
-We use three representative OLTP benchmarks:
-
-- **SmallBank**: Bank transaction workload with balance queries, deposits, and transfers
-- **TPC-C**: Industry standard wholesale distribution business workload
-- **Courseware**: University course enrollment system workload
-
-### Reproduce Experiments
-
-#### Q1: Benchmark Workload Allocation & Execution
-
-Use **Task A** to generate benchmark workloads, allocate isolation levels, and execute them with distributed simulation:
+## 7. 一次性复现实验（推荐顺序）
 
 ```sh
-# 1) Generate benchmark workloads
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 3 --txns-per-session 100 --max-key 50 --cases 3
+# build
+mvn -DskipTests compile
+mvn dependency:copy-dependencies
 
-# 2) Allocate isolation levels in batch
+# Q1: 分配效果
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadGenerator --sessions 10 --txns-per-session 200 --max-key 50000 --cases 1
 java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadAllocatorBatch
 
-# 3) Execute allocated benchmark workloads with distributed simulation
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
-```
+# Q3: 执行性能
+java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch
 
-**Output**: Distribution of isolation levels across program instances in each benchmark at `data/bench_allocation_distribution.csv`.
+# Q3: 三策略横向对比
+java -cp "target/classes;target/dependency/*" algorithm.BenchStrategyComparisonBatch
 
-#### Q2: Allocation Efficiency on Random Workloads
-
-Use **Task B** and **Task C** to evaluate the allocator's scalability by varying workload parameters:
-
-```sh
-# 1) Generate random workloads with default parameters
+# Q2: 随机工作负载效率
 java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadGenerator --txns 500 --max-ops 10 --max-key 500000 --read-only 30 --cases 5
-
-# 2) Allocate all random workloads and measure timing
 java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadAllocatorBatch
-
-# 3) Run controlled experiment sweep with parameter variations
 java -cp "target/classes;target/dependency/*" algorithm.RandomWorkloadExperiment
 ```
 
-**Output**: Allocation timing and performance metrics at `data/allocation_performance.csv` and `data/allocation_performance_analysis.csv`.
+## 8. 常见问题
 
-To measure scalability across different parameters:
-- Vary transaction count by adjusting `--txns` parameter
-- Vary operations per transaction by adjusting `--max-ops` parameter
-- Vary key space size by adjusting `--max-key` parameter
+1. **`ClassNotFoundException: com.fasterxml.jackson...`**
+    - 先执行：`mvn dependency:copy-dependencies`
 
-#### Q3: System Performance with Mixed Isolation Levels
+2. **PowerShell 报命令找不到（如 `head`）**
+    - 使用 `Select-Object -First N` 替代
 
-Execute **Task A** (specifically step 3) to measure throughput and latency improvements from fine-grained isolation level allocation:
-
-```sh
-java -cp "target/classes;target/dependency/*" algorithm.BenchWorkloadExecutorBatch 5 100 300 data/bench_execution_results.csv
-```
-
-This executes the allocated workloads in a simulated distributed setting (5 data centers with 100–300ms WAN latencies) and reports throughput and latency metrics.
-
-**Output**: Execution statistics at `data/bench_execution_results.csv`, including:
-- Throughput (transactions per second)
-- Latency (average transaction completion time)
-- Commit/abort rates per isolation level
+3. **想进一步加快实验**
+    - 维持 `3-10ms` 默认延迟，或手动传更小范围（例如 `2 6`）
